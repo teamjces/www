@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>grubで起動イメージを作って遊ぼう</title>
+  <style>
+    body {
+      font-family: "Yu Gothic", "YuGothic", "Yu Gothic UI", sans-serif;
+      font-size: 10.5pt;
+      line-height: 1.7;
+      margin: 2em;
+      color: #111;
+      background: #fff;
+      white-space: normal;
+    }
+    red {
+     display: block;
+     color: #D11;
+     text-indent: 0em;
+     margin: 0;
+   }
+   code {
+     display: block;
+     text-indent: 2em;
+     margin: 0;
+     white-space: pre-wrap;
+   }
+    h1, h2, h3 {
+      margin-top: 1.4em;
+      margin-bottom: 0.5em;
+      line-height: 1.4;
+    }
+    h1 { font-size: 1.35em; }
+    h2 { font-size: 1.15em; }
+    h3 { font-size: 1.05em; }
+  </style>
+</head>
+<body>
+<h1>grubで起動イメージを作って遊ぼう</h1>
+<h3>Mikiya Matsuzaka & ChatGPT</h3>
+<br>
+<br>
+PCなんて今あるんだっけ、という話は置いといて<br>
+<br>
+<red>
+grubで起動イメージを作って遊ぼう。CDやDVDに焼いたりUSBメモリでもいいぞ
+</red>
+<br>
+いまや多くの人にとって計算機といえばスマートフォンであり、「PCってまだ現役なの？」と感じる人がいても不思議ではない。実際、文章を書く、動画を見る、SNSをする、買い物をする──そういう日常用途ならスマホで十分な場面も多い。<br>
+<br>
+しかし、PCにはまだひとつ決定的な文化が残っている。<br>
+起動していない状態の機械を、自分の好きなソフトウェアで目覚めさせる自由である。<br>
+<br>
+その入口として、今日は GRUB を使って遊んでみよう。<br>
+<br>
+---<br>
+<br>
+GRUBとは何か<br>
+<br>
+GNU GRUB はブートローダである。<br>
+電源投入直後、OSの前に立ち上がり、どのカーネルを起動するか、どのOSを起こすか、何を読み込むかを決めるソフトだ。<br>
+<br>
+普通の人には黒い画面にしか見えないが、見方を変えればこれは 最初に動くプログラム環境 でもある。<br>
+<br>
+つまり、<br>
+<br>
+・メニューを出せる<br>
+・ファイルを読める<br>
+・カーネルを起動できる<br>
+・initrdを渡せる<br>
+・スクリプト的なこともできる<br>
+<br>
+という、なかなか面白い世界だ。<br>
+<br>
+---<br>
+<br>
+何を作るのか<br>
+<br>
+今回はこういう遊びをする。<br>
+<br>
+GRUB入りのISOイメージを作る<br>
+<br>
+・CD/DVDに焼く（まだ持ってるなら）<br>
+・USBメモリに書き込む<br>
+・実機や仮想マシンで起動する<br>
+<br>
+要するに、<br>
+<br>
+> 自分で作った「起動するメディア」<br>
+<br>
+を作るわけだ。<br>
+<br>
+これは昔ながらのPC文化の中でも、かなり味わい深い遊びである。<br>
+<br>
+---<br>
+<br>
+最小構成でやってみる<br>
+<br>
+Linux環境で GRUB が入っているとして、作業ディレクトリを作る。<br>
+<code>
+  mkdir -p iso/boot/grub
+</code>
+<br>
+設定ファイルを書く。<br>
+<code>
+  nano iso/boot/grub/grub.cfg
+</code>
+<br>
+内容：<br>
+<code>
+  set timeout=5
+  set default=0
+
+  menuentry "Hello GRUB" {
+    echo "Hello, world."
+    sleep 5
+  }
+
+  menuentry "Reboot" {
+    reboot
+  }
+
+  menuentry "Poweroff" {
+    halt
+  }
+</code>
+<br>
+これだけでもう起動メニューになる。<br>
+<br>
+---<br>
+<br>
+ISO化する<br>
+<code>
+  grub-mkrescue -o myboot.iso iso/
+</code>
+<br>
+これで myboot.iso ができる。<br>
+<br>
+このISOはそのまま仮想環境で起動できる。<br>
+<br>
+たとえば QEMU なら：<br>
+<code>
+  qemu-system-x86_64 -cdrom myboot.iso
+</code>
+<br>
+---<br>
+<br>
+CD/DVDに焼く<br>
+<br>
+光学ドライブがあるなら今でも焼ける。<br>
+<code>
+  wodim dev=/dev/sr0 myboot.iso
+</code>
+<br>
+あるいはGUIライティングソフトでもいい。<br>
+<br>
+令和に自作ブートCDを焼く。<br>
+この無意味さが素晴らしい。<br>
+<br>
+---<br>
+<br>
+USBメモリに入れる<br>
+<br>
+中身を全部消してよければ：<br>
+<code>
+  sudo dd if=myboot.iso of=/dev/sdX bs=4M status=progress
+  sync
+</code>
+<br>
+※ /dev/sdX はUSBメモリ本体。間違えると泣く。<br>
+<br>
+これでUSB起動メディアになる場合が多い。<br>
+<br>
+---<br>
+<br>
+さらに面白くするには<br>
+<br>
+Linuxカーネルを入れる<br>
+<code>
+  menuentry "Tiny Linux" {
+    linux /boot/vmlinuz root=/dev/ram0
+    initrd /boot/initrd.img
+  }
+</code>
+<br>
+自作レスキュー環境や実験環境になる。<br>
+<br>
+---<br>
+<br>
+壁紙を出す<br>
+<br>
+GRUBはテーマも使える。<br>
+起動直後から妙に凝った画面にできる。<br>
+<br>
+---<br>
+<br>
+自分のメッセージを刻む<br>
+<code>
+  echo "This machine belongs to TeamJCES."
+</code>
+<br>
+起動前に名乗るコンピュータ。悪くない。<br>
+<br>
+---<br>
+<br>
+なぜ今こんな遊びをするのか<br>
+<br>
+スマホ時代になると、多くの機械は「既に誰かが決めた状態」で渡される。<br>
+起動順序も、最低層の制御も、利用者には見えない。<br>
+<br>
+だがPCにはまだ、<br>
+<br>
+・電源を入れた瞬間から触れる<br>
+・自分のメディアで起こせる<br>
+・OSの前段階から弄れる<br>
+<br>
+という文化が残っている。<br>
+<br>
+それは単なる懐古趣味ではなく、<br>
+計算機を自分のものとして扱う感覚 に近い。<br>
+<br>
+---<br>
+<br>
+結び<br>
+<br>
+PCなんて今あるんだっけ、という時代でも、GRUBで起動イメージを作って遊ぶ価値はある。<br>
+<br>
+CDでもDVDでもUSBでもいい。<br>
+何なら仮想マシンだけでもいい。<br>
+<br>
+自分で作ったメニューが現れ、そこから機械が目覚める。<br>
+<br>
+その瞬間、コンピュータはまだ少しだけ、こちら側のものだ。<br>
+<br>
+<br>
+</body>
+</html>
