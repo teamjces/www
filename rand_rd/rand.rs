@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: CC0-1.0
+// This file is released into the public domain.
+// See https://creativecommons.org/publicdomain/zero/1.0/
 
 use std::cell::RefCell;
 use std::time::{SystemTime, UNIX_EPOCH};
