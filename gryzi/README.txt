@@ -1,3 +1,0 @@
-
-Gryzi — i tochka
-
