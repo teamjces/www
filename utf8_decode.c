@@ -1,4 +1,13 @@
-/* utf8_decode.c */
+/*
+ * utf8_decode.c
+ *
+ * This work is in the public domain.
+ * It is provided without any warranty or guarantee.
+ * You are free to use, modify, distribute, and reuse this file
+ * for any purpose, including commercial purposes, without restriction.
+ *
+ * CC0 1.0 Universal (https://creativecommons.org/publicdomain/zero/1.0/)
+ */
 
 #include <stdio.h>
 #include <stdlib.h>
