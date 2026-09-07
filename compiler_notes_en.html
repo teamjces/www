@@ -1,0 +1,1057 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Compiler / First Lambda / Dataflow Lisp Machine Notes</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #fafafa;
+  --fg: #1c1c1c;
+  --muted: #666;
+  --panel: #f1f1f1;
+  --border: #d7d7d7;
+  --code: #f4f4f4;
+  --quote: #f6f6f6;
+  --accent: #334;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111;
+    --fg: #eee;
+    --muted: #aaa;
+    --panel: #181818;
+    --border: #333;
+    --code: #1d1d1d;
+    --quote: #181818;
+    --accent: #d8d8e8;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  line-height: 1.72;
+}
+main {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 48px 22px 80px;
+}
+h1, h2, h3, h4 {
+  line-height: 1.25;
+  color: var(--accent);
+  scroll-margin-top: 1rem;
+}
+h1 { font-size: clamp(2rem, 4vw, 3.2rem); margin-bottom: 2rem; }
+h2 {
+  font-size: 1.65rem;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: .35rem;
+  margin-top: 3.5rem;
+}
+h3 { font-size: 1.3rem; margin-top: 2rem; }
+h4 { font-size: 1.05rem; margin-top: 1.5rem; }
+p, li { font-size: 1rem; }
+code, pre {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+code {
+  background: var(--code);
+  padding: .08em .3em;
+  border-radius: 4px;
+}
+pre {
+  overflow-x: auto;
+  background: var(--code);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem 1.1rem;
+  line-height: 1.45;
+}
+pre code {
+  padding: 0;
+  background: transparent;
+}
+blockquote {
+  margin: 1.2rem 0;
+  padding: .8rem 1rem;
+  border-left: 4px solid var(--border);
+  background: var(--quote);
+}
+section { margin-bottom: 2.5rem; }
+ul, ol { padding-left: 1.5rem; }
+@media print {
+  :root {
+    --bg: white;
+    --fg: black;
+    --accent: black;
+    --border: #bbb;
+    --code: #f7f7f7;
+    --quote: #f8f8f8;
+  }
+  body { background: white; }
+  main { max-width: none; padding: 0; }
+  pre { white-space: pre-wrap; overflow: visible; }
+  h2 { break-after: avoid; }
+  pre, blockquote { break-inside: avoid; }
+}
+</style>
+</head>
+<body>
+<main>
+
+<h1>Compiler / First Lambda / Dataflow Lisp Machine Notes</h1>
+
+<section>
+<h2>yc command and compilation stages</h2>
+<p>🎯</p>
+<p>The command is called <code>yc</code>.</p>
+<pre><code>% yc -c main.c -o main.o</code></pre>
+
+<p>🎯</p>
+<p>For example:</p>
+<pre><code>main.c
+main.c,pp
+main.c,tok
+main.c,ast
+main.c,ir
+main.s
+main.o</code></pre>
+
+<p>🎯</p>
+<p>PP: PreProcessor<br>
+TOK: TOKen<br>
+AST: Abstract Syntax Tree<br>
+IR: Intermediate Representation</p>
+
+<p>🎯</p>
+<p>When constructing the AST, I want to be able to say, “Oh, we already have cons cells and First Lambda.”</p>
+<p>Apparently, an unbelievable number of compilers simply assign enum values directly to things like <code>do-while</code> and <code>switch-case</code>.</p>
+
+<p>🎯</p>
+<p>The opposite of “abstract” is “concrete,” right? Would “particular” work for “concrete”?</p>
+<p>Since this is my system, the AST already consists only of cons cells and First Lambda. Then, after types and scopes have been resolved, does the AST become a PST?</p>
+
+<p>⏩</p>
+<p>Yes. The ordinary opposite of <em>abstract</em> is <em>concrete</em>. <em>Particular</em> is slightly different: it is more naturally contrasted with <em>general</em>, and carries the sense of “individual” or “specific.”</p>
+<pre><code>abstract ⇄ concrete
+general  ⇄ particular</code></pre>
+<p>Calling the stage after the AST a PST in your own terminology is perfectly plausible, especially if you define the stages like this:</p>
+<blockquote>
+<p>AST = a syntax tree reduced to cons cells + First Lambda<br>
+PST = the tree after type inference/checking, name resolution, and scope resolution</p>
+</blockquote>
+<p>In that sense, <em>Particularized Syntax Tree</em> works fairly well. What was previously abstract syntax has now been made specific: for every identifier, “this refers to this binding” and “this has this type” have been determined.</p>
+<p>In existing compiler terminology, this stage would more commonly be called a <em>typed AST</em>, <em>resolved AST</em>, <em>annotated AST</em>, or, somewhat later in the pipeline, HIR or semantic IR. PST is not a standard term, so you would be defining it as part of your own system.</p>
+<p>With First Lambda, something like <code>(if c a b)</code> would already have been reduced to a very small core. Then once all type, binding, and scope information has been attached, the feeling that the tree has become “particular” rather than merely “abstract” is quite natural.</p>
+<p>If you want the names to be symmetrical:</p>
+<pre><code>CST → AST → PST → IR</code></pre>
+<p>with PST defined as <em>Particular Syntax Tree</em> is an interesting choice. Here, <em>particular</em> means that previously unresolved semantic alternatives have been individually determined.</p>
+</section>
+
+<section>
+<h2>Higher-order inline functions and control structures</h2>
+<p>🎯</p>
+<pre><code>main.c
+main.c,pp
+main.c,tok
+main.c,cst
+main.c,ast
+main.c,pst
+main.c,ir
+main.s
+main.o</code></pre>
+<ul>
+<li>Build the CST from the tokens.</li>
+<li>Look at the file extension, load the control-structure definition file for that language — though in reality it is just a set of definitions of inline functions that take inline functions as arguments — and transform the CST into the AST.</li>
+<li>Resolve types, bindings, and scopes, and transform the AST into the PST.</li>
+</ul>
+<p>Are there things that are “inline functions taking inline functions as arguments” but are not control structures? Or can nesting such things produce something qualitatively different?</p>
+
+<p>⏩</p>
+<p>Yes. Quite a lot of things, in fact.</p>
+<p>Under your definition, “an inline function that takes an inline function as an argument” is essentially a higher-order inline function. That does not necessarily make it a control structure. Control structures are better regarded as one subset of that larger category.</p>
+<pre><code>map(xs, inline (x) { return x * 2; });</code></pre>
+<p>This takes an inline function, but we would not ordinarily classify <code>map</code> as a control structure in the same sense as <code>if</code> or <code>while</code>. The same is true of <code>filter</code>, <code>fold</code>, <code>sort_by</code>, and so on.</p>
+<pre><code>with_lock(lock, inline () {
+    ...
+});
+
+with_file(path, inline (f) {
+    ...
+});
+
+transaction(inline () {
+    ...
+});</code></pre>
+<p>These have the same general form. They are more naturally classified as resource management, environment control, or effect delimitation than as ordinary control structures.</p>
+
+<pre><code>with_lock(L,
+    transaction(
+        if_(condition,
+            lambda { ... },
+            lambda { ... })))</code></pre>
+
+<p>Here:</p>
+<pre><code>if_(condition, then_fn, else_fn)
+while_(condition_fn, body_fn)
+with_lock(lock, body_fn)
+transaction(body_fn)</code></pre>
+
+<p>can all have almost the same AST shape:</p>
+<pre><code>Application
+ ├─ operator
+ └─ arguments
+      ├─ value
+      └─ Lambda</code></pre>
+
+<p>Nesting can also create genuinely new control behavior:</p>
+<pre><code>retry(
+    transaction(
+        timeout(
+            lambda { ... })))</code></pre>
+
+<p>Individually these may just be higher-order operations, but their composition creates a distinctive control flow.</p>
+
+<pre><code>Inline higher-order primitive
+    │
+    ├── Control
+    │    ├── if
+    │    ├── while
+    │    ├── loop
+    │    └── catch
+    │
+    ├── Environment
+    │    ├── let
+    │    ├── with_lock
+    │    └── with_file
+    │
+    ├── Collection
+    │    ├── map
+    │    ├── filter
+    │    └── fold
+    │
+    └── Effect
+         ├── transaction
+         ├── async
+         ├── retry
+         └── continuation</code></pre>
+
+<p>The particularly important point is this:</p>
+<blockquote><p>What makes <code>if</code> special is not its syntax. What makes it special is that it controls when, and how many times, its Lambda arguments are invoked.</p></blockquote>
+
+<p>So from the First Lambda perspective, the essence of a control structure can be regarded as:</p>
+<blockquote><p>a higher-order function that governs the invocation policy of Lambda arguments.</p></blockquote>
+</section>
+
+<section>
+<h2>TOK language and DWARF source-level debugging</h2>
+<p>🎯</p>
+<p>After preprocessing a C source file, I tokenize it. Each token is enclosed in square brackets, and exactly one token is written per line.</p>
+<pre><code>[int]
+[main]
+[(]
+[)]
+[{]
+[return]
+[0]
+[;]
+[}]</code></pre>
+
+<p>I treat this token language as if it were a new programming language and build an implementation for it. At this stage it is only a mock-up: it concatenates the tokens again, reconstructs C source, passes that C source to an ordinary compiler, and obtains an executable binary.</p>
+
+<p>Now let us make the binary produced from this new language source-level debuggable in GDB.</p>
+
+<p>⏩</p>
+<p>This can be done, and at the mock-up stage you do not need to generate DWARF yourself. You can let GCC do the work.</p>
+<p>The key mechanism is <code>#line</code>.</p>
+
+<pre><code>#line 1 "main.tok"
+int
+#line 2 "main.tok"
+main
+#line 3 "main.tok"
+(
+#line 4 "main.tok"
+)
+#line 5 "main.tok"
+{
+#line 6 "main.tok"
+return
+#line 7 "main.tok"
+0
+#line 8 "main.tok"
+;
+#line 9 "main.tok"
+}</code></pre>
+
+<p>Since newlines are ordinarily just whitespace in C, this is effectively:</p>
+<pre><code>int main ( ) { return 0 ; }</code></pre>
+
+<p>But every token is preceded by a <code>#line</code> directive telling GCC which line of <code>main.tok</code> the following C line logically came from.</p>
+
+<pre><code>gcc -g -O0 generated.c -o main</code></pre>
+
+<p>The resulting DWARF line table can then refer to <code>main.tok</code>.</p>
+<pre><code>(gdb) break main
+(gdb) run</code></pre>
+<p>and GDB may display something like:</p>
+<pre><code>6    [return]</code></pre>
+
+<p>You can also aim for:</p>
+<pre><code>(gdb) break main.tok:6</code></pre>
+
+<p>The important limitation is that source lines map to machine instructions. Tokens such as <code>;</code> or <code>)</code> usually generate no machine instruction, so they may have no breakpoint location. That follows from the nature of the DWARF line table itself:</p>
+<blockquote><p>source location ↔ machine instruction</p></blockquote>
+</section>
+
+<section>
+<h2>yacc as a precedent</h2>
+<p>🎯</p>
+<p><code>yacc</code> also emits debugging information that refers back to the original grammar definition file. The automatically generated <code>y.tab.c</code> contains line-control information saying that generated code came from a particular line of <code>parse.y</code>.</p>
+
+<p>⏩</p>
+<p>Exactly. Generated <code>y.tab.c</code> / <code>*.tab.c</code> files conceptually contain directives such as:</p>
+<pre><code>#line 123 "parse.y"</code></pre>
+
+<p>The pipeline is:</p>
+<pre><code>parse.y
+   ↓ yacc
+y.tab.c
+   ↓ cc -g
+a.out + DWARF</code></pre>
+
+<p>yet the DWARF line table can still contain mappings to <code>parse.y</code>.</p>
+
+<p>This is not a hack. It is a long-established method for source-to-source compilers to propagate source positions from the generating language into a downstream compiler.</p>
+
+<pre><code>machine address
+   ↕
+IR node
+   ↕
+PST node
+   ↕
+AST node
+   ↕
+token
+   ↕
+line in main.c,tok</code></pre>
+</section>
+
+<section>
+<h2>lex, regular languages, and a simple scanner</h2>
+<p>🎯</p>
+<p><code>yacc</code> generates a parser for a context-free grammar. <code>lex</code> generates a scanner from regular-expression style lexical rules. A scanner breaks input into tokens.</p>
+
+<p>A simple hand-written scanner can classify the first character quickly, then dispatch to functions such as:</p>
+<pre><code>scan_plus()
+scan_and()
+scan_symbol()</code></pre>
+
+<p>using a two-stage table:</p>
+<pre><code>input character
+  ↓
+128/256-entry classification table
+  ↓
+small handler index
+  ↓
+scan_plus()
+scan_and()
+scan_symbol()
+...</code></pre>
+
+<p>The proposed <code>lex</code> exercise is to convert identifiers from snake_case to CamelCase while leaving string literals and comments untouched.</p>
+
+<pre><code>int very_long_name;
+printf("very_long_name");</code></pre>
+
+<p>should become:</p>
+<pre><code>int veryLongName;
+printf("very_long_name");</code></pre>
+
+<p>With <code>lex</code>/<code>flex</code>, start conditions such as:</p>
+<pre><code>INITIAL
+STRING
+CHAR
+COMMENT
+LINE_COMMENT</code></pre>
+<p>make this a good teaching example.</p>
+</section>
+
+<section>
+<h2>Prolog, unification, and decompilation</h2>
+<p>🎯 Teach me Prolog. What exactly is pattern matching in Prolog?</p>
+
+<p>⏩</p>
+<p>Prolog's “pattern matching” is more accurately called <em>unification</em>: making two terms agree by binding variables.</p>
+
+<pre><code>parent(taro, hanako).
+parent(hanako, jiro).
+
+?- parent(taro, X).
+
+X = hanako.</code></pre>
+
+<p>The same idea applies structurally:</p>
+<pre><code>f(a, X)
+f(Y, b)</code></pre>
+<p>unify to:</p>
+<pre><code>Y = a
+X = b</code></pre>
+
+<p>Lists make this especially clear:</p>
+<pre><code>?- [H | T] = [a, b, c].
+
+H = a,
+T = [b, c].</code></pre>
+
+<p>The classic relational example is:</p>
+<pre><code>append([], Ys, Ys).
+append([X|Xs], Ys, [X|Zs]) :-
+    append(Xs, Ys, Zs).</code></pre>
+
+<p>used forward:</p>
+<pre><code>?- append([a,b], [c,d], X).
+
+X = [a,b,c,d].</code></pre>
+
+<p>or backward:</p>
+<pre><code>?- append(X, Y, [a,b,c]).</code></pre>
+
+<p>which enumerates every prefix/suffix split.</p>
+
+<p>🎯 Could this be used for decompilation?</p>
+
+<p>⏩</p>
+<p>Yes. The core idea is to describe compilation as a relation rather than a one-way function:</p>
+<pre><code>AST ⇄ machine code</code></pre>
+
+<p>For example:</p>
+<pre><code>compile(add(X, Y), Code) :-
+    compile(X, CX),
+    compile(Y, CY),
+    append(CX, CY, C0),
+    append(C0, [add], Code).</code></pre>
+
+<p>Then:</p>
+<pre><code>?- compile(add(const(2), const(3)), Code).</code></pre>
+<p>works forward, while:</p>
+<pre><code>?- compile(AST, [push(2), push(3), add]).</code></pre>
+<p>can work backward.</p>
+
+<p>In realistic compilation the inverse is not unique, because optimization discards information. The more accurate question is:</p>
+<blockquote><p>Given machine code M, which IR / AST / type assignments / CFG / bindings are semantically consistent with M?</p></blockquote>
+</section>
+
+<section>
+<h2>Pattern-matcher generators and CST → AST</h2>
+<p>🎯</p>
+<p>A command such as <code>c,tok2c,ast.exe</code> could transform patterns like:</p>
+<pre><code>if, (, expr, ), clause
+if, (, expr, ), else, clause
+if, (, expr, ), clause, else, clause</code></pre>
+<p>into AST forms.</p>
+
+<p>⏩</p>
+<p>Yes. A CFG parser can do this, but a pattern-matcher generator can also do it naturally if it supports structural variables and recursive nonterminals.</p>
+
+<pre><code>if '(' $expr ')' $clause
+    => If($expr, $clause)
+
+if '(' $expr ')' else $clause
+    => If($expr, Empty, $clause)
+
+if '(' $expr ')' $clause1 else $clause2
+    => If($expr, $clause1, $clause2)</code></pre>
+
+<p>The clean division is:</p>
+<pre><code>tok → CST
+    CFG parsing is especially strong here
+
+CST → AST
+    tree pattern matching is especially strong here
+
+tok → AST directly
+    possible, but recursive nonterminals make it approach CFG parsing</code></pre>
+</section>
+
+<section>
+<h2>Preprocessor as a rewrite-system exercise</h2>
+<p>🎯</p>
+<p>The original concern was that an AST full of nodes such as <code>AST_DO_WHILE</code>, <code>AST_SWITCH</code>, and <code>AST_CASE</code> merely moves language-specific grammar categories into a tree. First Lambda is intended to reduce these into a smaller common structure.</p>
+
+<p>⏩</p>
+<p>That makes CST → AST a local structural rewriting problem, while AST → PST is context-dependent elaboration.</p>
+
+<pre><code>CST → AST
+local structural rewriting
+
+AST → PST
+context-dependent elaboration</code></pre>
+
+<p>The C preprocessor is a very good test case for a generic token rewriting engine:</p>
+<ol>
+<li>object-like macros,</li>
+<li>function-like macros,</li>
+<li>variable-length token-sequence capture,</li>
+<li>re-emission of captured sequences,</li>
+<li>recursive rescanning.</li>
+</ol>
+
+<p>A rule language might eventually look like:</p>
+<pre><code>rule object_macro
+    $name
+        => lookup_macro($name)
+
+rule function_macro
+    $name '(' $args... ')'
+        => expand($name, $args)</code></pre>
+
+<p>At that point the system is better described as a <em>token rewriting machine generator</em>.</p>
+</section>
+
+<section>
+<h2>PST, context sensitivity, and cascaded hash tables</h2>
+<p>🎯 All right, then why not use CSG for the PST? Predeclared types are context, aren't they?</p>
+
+<p>⏩</p>
+<p>That intuition is good. AST → PST is context-dependent because the meaning of a node depends on an environment Γ containing declarations, types, and bindings.</p>
+
+<pre><code>Γ ⊢ x : int
+Γ ⊢ y : int
+----------------
+Γ ⊢ x + y : int</code></pre>
+
+<p>However, classical context-sensitive grammars are narrower than what semantic analysis needs. A better implementation description is:</p>
+<blockquote><p>a context-sensitive rewrite system over tree patterns, conditioned by Γ.</p></blockquote>
+
+<pre><code>pattern:
+    (+ ?x ?y)
+
+context:
+    type(?x) = int
+    type(?y) = int
+
+replacement:
+    (int-add ?x ?y)</code></pre>
+
+<p>🎯 You remember my cascaded hash table, right?</p>
+
+<p>⏩</p>
+<p>Conceptually:</p>
+<pre><code>Frame3 → Frame2 → Frame1 → Global
+   ↓
+ lookup(x)</code></pre>
+
+<p>A node <code>x</code> has no complete meaning by itself. It becomes meaningful only under the environment:</p>
+<pre><code>Γ3 = Frame3 → Frame2 → Frame1 → Global</code></pre>
+
+<p>A more faithful model than the classical CSG notation is:</p>
+<pre><code>⟨Γ, A⟩ → ⟨Γ, P⟩</code></pre>
+
+<p>Your cascaded hash table is therefore a concrete implementation of Γ.</p>
+</section>
+
+<section>
+<h2>Templates and delayed name resolution</h2>
+<p>🎯 Templates are not CFG, are they? Can the cascaded hash table help?</p>
+
+<p>⏩</p>
+<p>The syntax can be parsed, but semantic determination cannot be handled by CFG parsing alone. Templates require name resolution under definition and instantiation contexts.</p>
+
+<pre><code>Instantiation frame
+    T → MyClass
+        ↓
+Template definition frame
+        ↓
+Enclosing namespace
+        ↓
+Global</code></pre>
+
+<p>The hash entries may need states such as:</p>
+<pre><code>resolved
+dependent
+unresolved/error</code></pre>
+
+<p>This makes templates a strong justification for the AST → PST split.</p>
+</section>
+
+<section>
+<h2>First Lambda and terminating decompilation</h2>
+<p>🎯 If First Lambda merely juggles clauses rather than behaving as a general function call, decompilation should not fall into an infinite loop.</p>
+
+<p>⏩</p>
+<p>Yes. You can make reverse transformation terminating by construction.</p>
+
+<p>Define:</p>
+<pre><code>μ(PST) = number of unconverted First Lambda nodes</code></pre>
+
+<p>and require every reverse rewrite to satisfy:</p>
+<pre><code>μ(after) &lt; μ(before)</code></pre>
+
+<p>For example:</p>
+<pre><code>FL_if(C, A, B)
+    ↓
+if (C) A else B</code></pre>
+
+<p>First Lambda remains deliberately weak: a finite family of structural nodes that package or rearrange clauses. Its weakness becomes a strength because structural information can survive round trips.</p>
+</section>
+
+<section>
+<h2>m68k displacement and link-time re-selection</h2>
+<p>🎯</p>
+<p>The m68k had register-relative addressing with limited displacement width. If structure member offsets are resolved only at link time, the final offset may not fit the originally chosen instruction encoding. I want to solve that by “decompilation.”</p>
+
+<p>⏩</p>
+<p>This is better viewed as <em>late instruction selection</em> than ordinary relocation.</p>
+
+<pre><code>semantic operation + final context
+             ↓
+best legal instruction sequence</code></pre>
+
+<p>Instead of retaining only:</p>
+<pre><code>move.l ??(a0),d0</code></pre>
+
+<p>retain semantic intent:</p>
+<pre><code>LOAD_MEMBER
+    base = p
+    type = S
+    member = x
+    result = ...</code></pre>
+
+<p>At link time, the final context may choose a short displacement, a longer sequence, or even a shorter zero-offset form.</p>
+
+<pre><code>does relocation fit?
+        │
+   yes ─┴─ no
+   │       │
+ patch   recover PST
+             ↓
+       instruction selection
+             ↓
+       new instruction sequence</code></pre>
+
+<p>This generalizes linker relaxation into semantic decompilation and recompilation.</p>
+</section>
+
+<section>
+<h2>Unknown CPUs and a fictional RISC</h2>
+<p>🎯 Could this really prepare us for CPUs that do not even exist yet? Could anyone have predicted Boolean registers? I want to work backward from a fictional RISC.</p>
+
+<p>⏩</p>
+<p>Yes — if the fictional RISC is not a common denominator of existing CPUs.</p>
+
+<p>A value such as:</p>
+<pre><code>r17 : bool</code></pre>
+
+<p>should not imply any physical register class. A flags-based CPU may eliminate it, a predicate-register CPU may map it directly, and another CPU may materialize an integer.</p>
+
+<p>The more useful abstraction is:</p>
+<blockquote><p>an infinite-register, typed abstract machine with explicit effects.</p></blockquote>
+
+<pre><code>%1 : ptr&lt;S&gt;
+%2 : i32 = member_load %1, S::x
+%3 : bool = lt %2, 10
+branch %3, L1, L2</code></pre>
+
+<p>For future hardware, the IR should preserve:</p>
+<pre><code>operation
+inputs
+outputs
+types
+effects
+constraints</code></pre>
+
+<p>The goal is not to predict future CPUs, but to preserve enough program meaning that future CPUs can choose their own implementation.</p>
+</section>
+
+<section>
+<h2>Pointers, Z80, DSPs, and target-independent meaning</h2>
+<p>🎯 Should pointers be <code>p32</code> and <code>p64</code>?</p>
+
+<p>⏩</p>
+<p>Better to separate semantic pointers from representation-level addresses:</p>
+<pre><code>ptr&lt;T&gt;     = semantic pointer
+addr16     = 16-bit machine address representation</code></pre>
+
+<p>On a Z80-like machine:</p>
+<pre><code>data width    = 8
+address width = 16</code></pre>
+
+<p>types such as <code>u8</code>, <code>u16</code>, and <code>ptr&lt;u8&gt;</code> are natural. Larger values can be legalized into multiple operations or lowered to libraries.</p>
+
+<p>A UTF-8 decoder is a good experiment because it mostly needs simple byte-level operations, pointers, comparison, shifts, loads/stores, and branches.</p>
+
+<p>The key principle is:</p>
+<blockquote><p>Type width describes the width required by source-level meaning, not the width of the target's physical registers.</p></blockquote>
+
+<p>Pointers should ideally support address spaces:</p>
+<pre><code>ptr&lt;u8, main16&gt;
+ptr&lt;u8, io&gt;</code></pre>
+
+<p>or, on a DSP:</p>
+<pre><code>ptr&lt;i16, program&gt;
+ptr&lt;i16, data&gt;</code></pre>
+</section>
+
+<section>
+<h2>Dataflow and von Neumann machines</h2>
+<p>🎯</p>
+<p>What I want is to treat both von Neumann and dataflow machines according to the rule:</p>
+<blockquote><p>Keep everything separate for as long as it can possibly execute in parallel.</p></blockquote>
+
+<p>⏩</p>
+<p>That suggests making dependency, rather than order, the primary semantics.</p>
+
+<pre><code>load p ─→ add 1 ─┐
+                 ├→ add
+load q ─→ mul 2 ─┘</code></pre>
+
+<p>A von Neumann target imposes a legal total order. A dataflow target can preserve the partial order directly.</p>
+
+<pre><code>partial order
+    ↓ scheduling
+total order
+    ↓
+von Neumann CPU</code></pre>
+
+<p>Effect dependencies can be made explicit with tokens such as:</p>
+<pre><code>%M1 = store %M0, %p, %x
+%M2 = store %M1, %p, %y</code></pre>
+
+<p>The core then becomes:</p>
+<pre><code>Typed values
++
+Operations
++
+Explicit effects
++
+Dependency edges
++
+Control-flow regions</code></pre>
+
+<p>Or, in one sentence:</p>
+<blockquote><p>Order is not meaning. Dependency is meaning. Introduce an execution order only when targeting a machine that requires one.</p></blockquote>
+</section>
+
+<section>
+<h2>Persistent scope trees and Rust-like safety</h2>
+<p>🎯</p>
+<p>If cascaded hash-table frames are not deleted when leaving a scope, they form a persistent tree of scopes. Can that be used for safety?</p>
+
+<p>⏩</p>
+<p>Yes. The structure becomes a region/lifetime tree.</p>
+
+<pre><code>global
+└─ frame A
+   ├─ frame B
+   │  └─ frame C
+   └─ frame D</code></pre>
+
+<p>A variable can retain metadata such as:</p>
+<pre><code>x:
+    declared_in = B
+    type = T
+    storage = stack</code></pre>
+
+<p>A pointer derived from a stack object can be constrained to descendant scopes of the owner's region.</p>
+
+<pre><code>ptr&lt;T, frame=B&gt;</code></pre>
+
+<p>That can detect use-after-scope, dangling stack pointers, some forms of use-after-free, and invalid closure capture.</p>
+
+<p>Leaving a scope need not erase history:</p>
+<pre><code>B.status = closed</code></pre>
+
+<p>The same structure can therefore serve:</p>
+<pre><code>lookup chain
+    → name resolution
+
+persistent scope tree
+    → lifetime / ownership / escape / provenance analysis</code></pre>
+
+<p>A useful first rule is:</p>
+<blockquote><p>A pointer derived from a stack object may only be dereferenced within descendant scopes of the object's owner scope.</p></blockquote>
+</section>
+
+<section>
+<h2>Dataflow Lisp Machine</h2>
+<p>🎯</p>
+<p>Before designing the ultimate IR, let us think about a “dataflow Lisp Machine” and its source language.</p>
+
+<p>⏩</p>
+<p>That is probably better than inventing the ultimate IR in the abstract.</p>
+
+<pre><code>(let ((a (+ x y))
+      (b (hash-get table key))
+      (c (utf8-decode stream)))
+  ...)</code></pre>
+
+<p>In the proposed machine, these independent operations are launched simultaneously.</p>
+
+<pre><code>                ┌─ Numeric Engine
+Lisp Machine ───┼─ String Engine
+                ├─ Hash Engine
+                ├─ Memory Engine
+                └─ Control / Scheduler</code></pre>
+
+<p>An S-expression describes:</p>
+<pre><code>operation + operands + dependencies</code></pre>
+
+<p>rather than a mandatory instruction sequence.</p>
+
+<p>Side effects can be represented through state tokens such as memory-state, I/O-state, and hash-state.</p>
+
+<p>The source language can invert ordinary Lisp's sequencing convention:</p>
+<pre><code>implicit parallelism
+explicit sequencing</code></pre>
+
+<p>For example:</p>
+<pre><code>(let ((x (foo))
+      (y (bar)))
+  (+ x y))</code></pre>
+
+<p>allows <code>foo</code> and <code>bar</code> to run in parallel, while:</p>
+<pre><code>(seq
+  (write-port p a)
+  (write-port p b))</code></pre>
+
+<p>explicitly requests order.</p>
+</section>
+
+<section>
+<h2>Domain-specific accumulators and stateful channels</h2>
+<p>🎯</p>
+<p>A UTF-8 decoder might use a four-byte high-speed SRAM ring buffer, returning a pointer and a valid-byte count. After consuming a three-byte sequence, it refills three bytes and continues.</p>
+
+<p>⏩</p>
+<p>This suggests a domain-specific accumulator:</p>
+<pre><code>UTF8 accumulator
+    ring[4] : u8
+    head    : 0..3
+    valid   : 0..4</code></pre>
+
+<p>The key principle is not to standardize transport between coprocessors too early. The abstract layer should constrain only:</p>
+<pre><code>operation
+dependency
+type
+effect</code></pre>
+
+<p>and not:</p>
+<pre><code>transport
+buffer organization
+register topology</code></pre>
+
+<p>The four-byte ring buffer is really a stateful channel:</p>
+<pre><code>producer ⇄ stateful channel ⇄ consumer</code></pre>
+
+<p>The IR might therefore make channels first-class:</p>
+<pre><code>channel&lt;T&gt;
+capacity = 4
+consume(n)
+refill(n)
+peek(n)</code></pre>
+
+<p>Targets may implement the same channel as memory, registers, SRAM, latches, or a dedicated coprocessor accumulator.</p>
+</section>
+
+<section>
+<h2>Request objects instead of continuations</h2>
+<p>🎯</p>
+<p>A Request object contains:</p>
+<ul>
+<li>a function pointer / closure,</li>
+<li>an argument list,</li>
+<li>return destination(s).</li>
+</ul>
+
+<p>⏩</p>
+<p>In Scheme, the core becomes:</p>
+<pre><code>Request = (closure, arguments, destinations)</code></pre>
+
+<p>It packages:</p>
+<blockquote><p>thing to invoke + input edges + output edges</p></blockquote>
+
+<p>Unlike CPS, the Request does not contain the computation to perform after the result is produced. It only says where the result goes.</p>
+
+<p>A useful definition for programming-language researchers would be:</p>
+<blockquote><p>A Request is a triple consisting of a closure, a list of arguments, and a list of result destinations. Unlike CPS, it does not contain the computation to be performed after the return.</p></blockquote>
+
+<p>More abstractly:</p>
+<pre><code>Operator
+Inputs
+Outputs</code></pre>
+
+<p>This generalizes beyond function calls to coprocessors, remote procedures, UTF-8 decoders, and other execution units.</p>
+</section>
+
+<section>
+<h2>Scheduling Request graphs</h2>
+<p>🎯</p>
+<p>If we create many objects consisting of an execution unit, its inputs, and its outputs, what happens when they cannot execute in parallel?</p>
+
+<p>⏩</p>
+<p>Build a dependency graph and distinguish semantic order from physical serialization.</p>
+
+<pre><code>independent
+    → parallel execution allowed
+
+RAW: read after write
+    → impose an ordering
+
+WAW: write after write
+    → serialize if semantics determine an order;
+      otherwise reject
+
+dependency cycle
+    → reject unless explicit delay/state exists</code></pre>
+
+<p>If only one execution unit is available, use a ready stack or ready queue. The same Request graph can therefore run on:</p>
+<pre><code>1 execution unit → sequential machine
+2 units          → 2-way parallel
+N units          → dataflow parallelism</code></pre>
+
+<p>The crucial distinction is:</p>
+<pre><code>logical ordering
+    ≠
+physical serialization</code></pre>
+
+<p>A cyclic graph with no initial state can be rejected at compile time as a <code>cyclic request dependency</code>.</p>
+</section>
+
+<section>
+<h2>Proposed pipeline</h2>
+<pre><code>main.c
+　↓
+main.c,pp
+　↓　two-stage lookup
+main.c,tok
+　↓　CFG
+main.c,cst
+　↓　First Lambda
+main.ast
+　↓　CSG
+main.pst
+　↓　Request Object
+main.ir
+　↓　decompilation
+main.s</code></pre>
+</section>
+
+<section>
+<h2>Inline Functions as Syntax</h2>
+<h3>— Inline Functions as Grammar —</h3>
+
+<h3>Abstract</h3>
+<p>This paper proposes a framework in which immediately executed lambda expressions — so-called IIFEs, or Immediately Invoked Function Expressions — are interpreted not merely as function application, but as syntax.</p>
+<p>This makes it possible to investigate whether control structures such as <code>let</code> and <code>while</code> can be expressed entirely through function notation, without depending on macro expansion.</p>
+<p>The approach attempts to redefine the boundary between “function” and “syntax” and to unify the basis for syntactic extension under a single mechanism.</p>
+
+<h3>1. Background and Motivation</h3>
+<p>In many functional programming languages, particularly in the Lisp family, macro systems are used to introduce new syntactic forms.</p>
+<p>Macros are powerful, but they also introduce several kinds of complexity:</p>
+<ul>
+<li>they add a meta-level distinct from the ordinary evaluation system;</li>
+<li>programmers must understand expansion rules;</li>
+<li>problems such as hygiene arise.</li>
+</ul>
+<p>Function application, on the other hand, is already part of the core language.</p>
+<p>If function application itself could be made to play a syntactic role, it might be possible to obtain a simpler overall system.</p>
+<p>From this perspective, this paper proposes a reinterpretation in which:</p>
+<blockquote><p>inline functions are treated as syntax.</p></blockquote>
+
+<h3>2. Basic Idea</h3>
+<p>The starting point is a form such as:</p>
+<pre><code>((lambda ...)</code></pre>
+<p>Ordinarily, this is understood as immediately applying a function object produced by a lambda expression.</p>
+<p>This paper instead changes the evaluation model and reinterprets the construct as follows:</p>
+<blockquote><p>Rather than treating the function produced by the lambda expression as an object, treat it as syntax that is expanded inline at the call site.</p></blockquote>
+<p>Under this interpretation, the lambda expression behaves not as a value but as a syntactic template.</p>
+
+<h3>3. Inline Functions as Grammar</h3>
+<h4>3.1 Re-expressing <code>let</code></h4>
+<pre><code>(let ((x v)) body)</code></pre>
+<p>is equivalent to:</p>
+<pre><code>((lambda (x) body) v)</code></pre>
+<p>The proposal goes one step further. If the latter is treated not merely as function application but as syntax, then <code>let</code> need no longer be regarded as a distinct syntactic construct.</p>
+
+<h4>3.2 Describing Control Structures</h4>
+<p>Loops and conditional control structures can likewise be expressed through recursion and delayed evaluation.</p>
+<pre><code>((lambda (loop)
+   (loop loop))
+ (lambda (self)
+   (if cond
+       (begin body (self self))
+       #f)))</code></pre>
+<p>Such constructions are normally regarded as encodings through higher-order functions. Under the position taken here, they are treated as forms of syntax.</p>
+
+<h3>4. Relationship to Macros</h3>
+<p>This approach may serve as an alternative to macros in some situations, but it is not necessarily a complete replacement.</p>
+<p>Macros typically provide arbitrary syntactic transformation and compile-time execution. By contrast, this proposal is characterized by reinterpretation of evaluation rules and unification around a single primitive mechanism: lambda.</p>
+<blockquote><p>an approach that reduces syntactic extension to the function mechanism.</p></blockquote>
+
+<h3>5. Technical Problems</h3>
+<h4>Evaluation order</h4>
+<p>How should evaluation order be defined? How should guaranteed inlining interact with ordinary evaluation?</p>
+
+<h4>Variable capture</h4>
+<p>The approach may encounter variable-capture issues similar to those of macros. A hygiene discipline may therefore still be required.</p>
+
+<h4>Optimization</h4>
+<p>What is the relationship between required inline expansion and ordinary compiler optimization? Where is the boundary between semantic inlining and optional optimization?</p>
+
+<h4>Formal semantics</h4>
+<p>Is this merely a transformation system, or does it constitute a genuinely new evaluation strategy?</p>
+
+<h3>6. Conclusion</h3>
+<p>This paper has proposed the idea of <strong>Inline Functions as Syntax</strong>, in which immediately invoked lambda expressions are treated as syntactic constructs.</p>
+<p>The approach may:</p>
+<ul>
+<li>blur the boundary between functions and syntax;</li>
+<li>permit some syntactic constructs to be represented without macros;</li>
+<li>provide a basis for reconsidering the minimal core of a programming language.</li>
+</ul>
+<p>Future work will require both formal semantic treatment and implementation-based evaluation.</p>
+</section>
+
+<section>
+<h2>Continuations versus First Lambda</h2>
+<p>🎯</p>
+<p>People casually say:</p>
+<blockquote><p>“Continuations can express arbitrary control structures.”</p></blockquote>
+
+<p>But a continuation is basically like the CPU context that a multitasking operating system preserves for time sharing. Of course it can express arbitrary control structures. It is powerful enough to represent much more than ordinary structured control.</p>
+
+<p>So if all we really need is enough power to express ordinary control structures, what is the weakest mechanism that suffices?</p>
+<p>My answer is First Lambda.</p>
+
+<p>⏩</p>
+<p>The central claim can be stated as follows:</p>
+<blockquote>
+<p>Continuations can express arbitrary control structures because they capture the whole future of a computation. But that is overkill. To define ordinary control structures, we do not need first-class continuations; we need first-class inline lambdas.</p>
+</blockquote>
+
+<p>A continuation reifies the remainder of a computation. First Lambda is deliberately weaker: it provides delayed code fragments that can be passed as values while guaranteeing that their invocation is semantically realized as inline expansion.</p>
+
+<p>The core contrast is:</p>
+<pre><code>Continuation:
+    capture and resume the future of a computation
+
+First Lambda:
+    place a delayed code fragment here</code></pre>
+
+<p>That weaker mechanism may still be sufficient for ordinary control structures while imposing much less semantic and implementation machinery.</p>
+
+<p>A more formal statement is:</p>
+<blockquote>
+<p>A continuation reifies the remainder of a computation, and therefore naturally has enough expressive power to encode arbitrary control flow. However, ordinary control structures do not necessarily require such a strong mechanism. It may suffice to treat delayed code fragments as first-class arguments while guaranteeing that their invocation is semantically realized as inline expansion. This restricted mechanism is what we call First Lambda.</p>
+</blockquote>
+</section>
+
+</main>
+</body>
+</html>
