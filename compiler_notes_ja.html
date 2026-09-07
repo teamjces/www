@@ -1,0 +1,4574 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>First Lambda / Compiler Design Notes</title>
+<style>
+:root{color-scheme:light dark;--bg:#fbfbfa;--fg:#202124;--panel:#f3f4f6;--border:#d1d5db}
+@media(prefers-color-scheme:dark){:root{--bg:#111315;--fg:#eceff1;--panel:#191c20;--border:#343a40}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font-family:"Yu Gothic","Hiragino Kaku Gothic ProN","Noto Sans JP",system-ui,sans-serif;line-height:1.9}main{max-width:1100px;margin:auto;padding:28px 16px 72px}article{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:24px clamp(16px,4vw,42px)}pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:15px/1.9 "Yu Gothic","Hiragino Kaku Gothic ProN","Noto Sans JP",system-ui,sans-serif}@media(max-width:700px){main{padding:12px 8px 40px}article{padding:16px 12px}pre{font-size:14px}}@media print{body{background:white;color:black}main{max-width:none;padding:0}article{border:0;padding:0}pre{font-size:10.5pt;line-height:1.6}}
+</style>
+</head>
+<body><main><article><pre>
+🎯
+
+コマンド名は yc です。
+
+% yc -c main.c -o main.o
+
+🎯
+
+例えば、
+
+main.c
+main.c,pp
+main.c,tok
+main.c,ast
+main.c,ir
+main.s
+main.o
+
+🎯
+
+PP: PreProcessor, プリプロセッサ
+TOK: TOKen, トークン
+AST: Abstract Syntax Tree, 抽象構文木
+IR: Intermediate Representation, 中間表現
+
+🎯 ASTを構成する際に、「あっ、ConsセルとFirst Lambdaは持ってます」と言いましょう。信じられないくらいほとんどのコンパイラがdo〜whileとかswitch〜caseにそのままenumを振ってるらしいですよ。
+
+🎯 抽象の反対って具体だよな？具体ってparticularかな？俺のやってることだからASTの時点でConsセルとFirst Lambdaだけど、ASTは型とスコープが洗われてPSTになる？
+
+⏩ うん。「抽象 abstract」の対義語としては普通は concrete（具体）。particular は少し違って、「一般 general」に対する「個別・特定」のニュアンスが強い。
+
+だからコンパイラ文脈で言うなら、かなり綺麗にこう分けられる。
+
+abstract ⇄ concrete：抽象表現 ⇄ 具体的な表現
+general ⇄ particular：一般的なもの ⇄ 個別のもの
+
+AST の次をあなたの用語で PST と呼ぶのは十分アリだと思う。特に、
+
+&gt; AST = Consセル + First Lambda で構文を抽象化した木
+PST = 型推論/型検査・名前解決・スコープ確定を済ませた木
+
+という意味なら、Particularized Syntax Tree あたりはかなり意味が通る。「抽象構文」だったものが、各識別子について「これはこの束縛」「これはこの型」と具体化・個別化されるわけだから。
+
+ただ、既存コンパイラ用語ならこの段階は普通 typed AST、resolved AST、annotated AST、あるいは少し進めば HIR / semantic IR と呼ぶことが多い。PST は一般的な標準語ではないので、自分の体系として定義する感じになる。
+
+あなたの First Lambda なら、たとえば
+
+(if c a b)
+
+が最初から
+
+((lambda (...) ...) ...)
+
+的な少数の核に落ちていて、AST自体が極端に小さい。そこへ型・束縛・スコープ情報を全部刺した時点で、確かに「Abstract ではなく Particular になった」という感覚はかなり自然。
+
+むしろ名前を対称にしたいなら CST → AST → PST → IR として、PST を Particular Syntax Tree と定義するのは面白い。ここでいう particular は「具体的な構文」というより、未確定だった意味上の選択肢が一つ一つ確定した構文木、と説明すると強い。
+
+🎯
+main.c
+main.c,pp
+main.c,tok
+main.c,cst
+main.c,ast
+main.c,pst
+main.c,ir
+main.s
+main.o
+
+・トークンからCSTを組む。
+
+・拡張子を見てその言語の制御構造の定義ファイル（と言ってもインライン関数を引数に取るインライン関数の定義群）を読んでASTに変換する。
+
+・型、束縛、スコープを洗ってPSTに変換。
+
+「インライン関数を引数に取るインライン関数」であって制御構造でないものってある？あるいはそれが入れ子になることで何かになる？
+
+⏩ ある。かなりある。eck
+
+あなたの定義だと、
+
+&gt; 「インライン関数を引数に取るインライン関数」＝高階インライン関数
+
+であって、それ自体は必ずしも制御構造ではない。制御構造はその部分集合と見たほうがきれいだと思う。
+
+例えば概念的にはこういうものがある。
+
+map(xs, inline (x) { return x * 2; });
+
+これはインライン関数を受け取っているが、普通は if や while のような制御構造とは呼ばない。filter、fold、sort_by なんかも同じ。
+
+さらに、
+
+with_lock(lock, inline () {
+    ...
+});
+
+with_file(path, inline (f) {
+    ...
+});
+
+transaction(inline () {
+    ...
+});
+
+も同じ形になる。これは「制御構造」というより、資源管理・環境設定・効果の囲い込みだな。
+
+面白いのは、これらを入れ子にすると、かなり「言語構文」そのものに近づくこと。
+
+たとえば、
+
+with_lock(L,
+    transaction(
+        if_(condition,
+            lambda { ... },
+            lambda { ... })))
+
+みたいになる。
+
+ここで
+
+if_(condition, then_fn, else_fn)
+
+も
+
+while_(condition_fn, body_fn)
+
+も
+
+with_lock(lock, body_fn)
+
+も
+
+transaction(body_fn)
+
+も、AST上ではほとんど同じ形にできる。
+
+つまり、
+
+Application
+ ├─ operator
+ └─ arguments
+      ├─ value
+      └─ Lambda
+
+で統一できる。
+
+さらに重要なのは、入れ子になることで新しい制御構造が発生する場合もあるという点。
+
+たとえば、
+
+retry(
+    transaction(
+        timeout(
+            lambda { ... })))
+
+なら、
+
+transaction が失敗を捕捉する
+retry が再実行する
+timeout が途中で脱出する
+
+という具合に、個々には単なる高階関数でも、組み合わせ全体として独自の制御フローになる。
+
+もっと極端なのが、
+
+bind(x,
+    lambda(x) {
+        bind(y,
+            lambda(y) {
+                return_(x + y);
+            });
+    });
+
+で、これはモナド的な bind だが、何を bind とするかによって、
+
+例外
+非同期処理
+continuation
+nondeterminism
+状態
+coroutine
+
+まで表現できる。
+
+だから First Lambda の考え方を押し進めるなら、おそらく分類はこうしたほうがいい。
+
+Inline higher-order primitive
+    │
+    ├── Control
+    │    ├── if
+    │    ├── while
+    │    ├── loop
+    │    └── catch
+    │
+    ├── Environment
+    │    ├── let
+    │    ├── with_lock
+    │    └── with_file
+    │
+    ├── Collection
+    │    ├── map
+    │    ├── filter
+    │    └── fold
+    │
+    └── Effect
+         ├── transaction
+         ├── async
+         ├── retry
+         └── continuation
+
+でもコンパイラ内部では全部ほぼ同族にしてしまえる。
+
+そしてあなたの
+
+CST
+ ↓
+言語別「制御構造定義」
+ ↓
+AST
+ ↓ 型・束縛・スコープ
+PST
+
+という設計なら、「制御構造定義ファイル」という名前を少し広げて、たとえば structural primitives や special inline forms の定義ファイルにしておくと将来きれいだと思う。
+
+特に重要なのは、
+
+&gt; if が特別なのではなく、引数の Lambda の評価時点や評価回数を支配する関数が特別
+
+と定義できること。
+
+普通の
+
+f(a(), b())
+
+なら引数を先に評価する。
+
+しかし
+
+if_(c, lambda {...}, lambda {...})
+
+では Lambda の中身を先に実行してはいけない。
+
+つまり First Lambda 的には、制御構造の本質は「構文」よりも
+
+Lambda の invocation policy を支配する高階関数
+
+と考えるとかなり一本化できる。
+
+そして while は「Lambda を0回以上呼ぶ」、if は「二つのLambdaの片方を0/1回呼ぶ」、map は「Lambdaを要素数回呼ぶ」。この見方をすると if/while/map の境界すらかなり薄くなる。
+
+🎯 Cのソースをプリプロセスした後トークナイズします。ひとつひとつのトークンを角カッコで囲みます。一行にひとつだけトークンを書きます。こんな風になります。
+
+[int]
+[main]
+[(]
+[)]
+[{]
+[return]
+[0]
+[;]
+[}]
+
+このトークン言語を新言語のように見做し、処理系を作ります。と言ってもここではモックアップ。トークンをもう一度繋いでCのソースに戻すだけです。それを普通のコンパイラに掛け、実行バイナリを得ます。ここまでよろしいですか？
+
+この新言語のバイナリをgdbでソースレベルデバッグできるようにしましょう。DWARFというのはどんな言語のデバッグ情報も格納できるようになっています。このトークン言語も然りです。-gオプションで「ソースのファイル名と行番号の情報を含んだ」Cのソースが出力されるようにしましょう。得られたバイナリはもちろんトークン言語のソースファイルを指すデバッグ情報を含んでいます。
+
+頑張ってください。
+
+⏩ はい。これはできます。しかもモックアップ段階なら、DWARFを自前で生成する必要はありません。GCC に全部やらせられます。
+
+ポイントは #line です。GCC の -g はDWARFデバッグ情報を生成し、GDBはそれを使ってソースファイルと行番号を対応させます。
+
+たとえば新言語を仮に TOK言語 とします。
+
+main.tok:
+
+[int]
+[main]
+[(]
+[)]
+[{]
+[return]
+[0]
+[;]
+[}]
+
+TOK→Cコンパイラは、単純にこういうCを吐きます。
+
+#line 1 &quot;main.tok&quot;
+int
+#line 2 &quot;main.tok&quot;
+main
+#line 3 &quot;main.tok&quot;
+(
+#line 4 &quot;main.tok&quot;
+)
+#line 5 &quot;main.tok&quot;
+{
+#line 6 &quot;main.tok&quot;
+return
+#line 7 &quot;main.tok&quot;
+0
+#line 8 &quot;main.tok&quot;
+;
+#line 9 &quot;main.tok&quot;
+}
+
+これ、ちゃんとCです。
+
+Cにとって改行は基本的に空白なので、プリプロセッサを通したあとは実質、
+
+int main ( ) { return 0 ; }
+
+になります。
+
+ところが各トークンの直前にある #line が、「次のCソース行は main.tok の何行目から来たか」をGCCへ教えています。
+
+したがって、
+
+gcc -g -O0 generated.c -o main
+
+とすれば、生成されたDWARFのline tableは、generated.cではなく main.tok の行番号を指せるわけです。
+
+すると、
+
+gdb ./main
+
+から
+
+(gdb) break main
+(gdb) run
+
+として停止したとき、GDBはたとえば
+
+6    [return]
+
+のようにTOK言語のソースを表示できます。
+
+さらに、
+
+(gdb) break main.tok:6
+
+も狙えます。
+
+最小の tok2c
+
+たとえばPythonならモックアップ処理系はこれだけです。
+
+#!/usr/bin/env python3
+
+import sys
+
+src = sys.argv[1]
+
+with open(src, encoding=&quot;utf-8&quot;) as f:
+    for lineno, line in enumerate(f, 1):
+        line = line.rstrip(&quot;\n&quot;)
+
+        if not (line.startswith(&quot;[&quot;) and line.endswith(&quot;]&quot;)):
+            raise SyntaxError(f&quot;{src}:{lineno}: malformed token&quot;)
+
+        token = line[1:-1]
+
+        filename = src.replace(&quot;\\&quot;, &quot;\\\\&quot;).replace(&#x27;&quot;&#x27;, &#x27;\\&quot;&#x27;)
+
+        print(f&#x27;#line {lineno} &quot;{filename}&quot;&#x27;)
+        print(token)
+
+実行：
+
+python3 tok2c.py main.tok &gt; main.c
+gcc -g -O0 main.c -o main
+gdb ./main
+
+この構造が面白いところです。
+
+main.c
+   ↓ preprocess
+main.i
+   ↓ tokenize
+main.tok        ← 新言語の「ソース」
+   ↓ tok2c
+generated.c     ← Cバックエンド用中間表現
+   ↓ gcc -g
+main
+
+そしてデバッグ情報上は、
+
+main
+  └── DWARF
+       └── main.tok:6
+
+となる。
+
+つまり Cをバックエンド言語にしているのに、Cを隠してTOK言語をソースレベルデバッグする という、小さいながら本物のsource-to-source compilerになります。
+
+一点だけ重要な限界があります。GDB/DWARFの「行」は機械語命令に対応します。そのため、
+
+[return]    ← 6
+[0]         ← 7
+[;]         ← 8
+
+について、6・7・8の全部で必ず停止できるわけではありません。return 0; から生成される命令にGCCがどのsource locationを付けたか次第です。; や ) のような機械語を一つも生まないトークンには停止地点が存在しないのが普通です。
+
+これはTOK言語の欠陥ではなく、
+
+&gt; source line ↔ machine instruction
+
+というDWARF line tableそのものの性質です。
+
+また、「DWARFはどんな言語でも」という部分には少し区別があります。ファイル名・行番号を機械語へ対応させること自体はこのTOK言語でも問題ありません。一方GDBの print x+1 のような式評価にはGDB側の言語フロントエンドが関係するので、完全な独自言語デバッガにするならもう一段仕事が必要です。DWARFはGDBが最もよくサポートする表現力の高いデバッグ形式です。
+
+そしてこの実験は、前に話していた
+
+C
+↓ preprocess
+トークン
+↓ CST
+AST
+↓
+PST
+↓
+IR
+↓
+machine code
+
+の系統にかなり綺麗につながります。最初は TOK→C + #line だけにしておけば、独自バックエンドも独自DWARF writerも不要です。それでも .tok にブレークポイントを置ける「新言語処理系」が成立します。
+
+次の段階ではさらに面白くて、[return] のようなトークン単位ではなく、CST/ASTノードがどの .tok の範囲 [6..8] に由来するかを保持する source location オブジェクトを導入すると、そのまま本格コンパイラのデバッグ情報設計になります。
+
+🎯
+
+main.c
+main.i
+main.c,tok
+main.c,ast
+main.c,pst
+main.c,ir
+main.s
+main.o
+
+🎯 ちなみにyaccなんかもちゃんと元の文法定義ファイルを指すデバッグ情報を吐いてくれるんですよ。すなわちyaccが自動生成する&quot;y.tab.c&quot;には「&quot;&#x27;parse.y&quot;の何行目」という情報が埋め込まれるんです。それはgdbでソースレベルデバッグできます。
+
+⏩ そうです。そこはまさに、さっきの「トークン言語 → C → バイナリ」をデバッグ可能にする話のかなり良い先例です。
+
+yacc/bison 系では、生成された y.tab.c / *.tab.c の中に、概念的には
+
+#line 123 &quot;parse.y&quot;
+
+のような行制御指令を挿入します。すると C コンパイラは「いまコンパイルしているこの部分は、論理的には parse.y の123行目から来たものだ」と認識します。
+
+したがって流れは、
+
+parse.y
+   ↓ yacc
+y.tab.c
+   ↓ cc -g
+a.out + DWARF
+
+なのに、DWARF の行番号表には
+
+parse.y : 123
+parse.y : 124
+...
+
+という対応を持たせられる。結果として GDB からは、生成物の y.tab.c だけではなく、生成元の .y ファイルをソースとして扱ってブレークしたりステップしたりできるわけです。
+
+これはあなたのトークン言語にもほとんどそのまま使えます。例えば
+
+main.c,tok
+
+[int]       ← 1行目
+[main]      ← 2行目
+[(]         ← 3行目
+[)]         ← 4行目
+[{]         ← 5行目
+[return]    ← 6行目
+[0]         ← 7行目
+[;]         ← 8行目
+[}]         ← 9行目
+
+から C を再生成するとき、
+
+#line 1 &quot;main.c,tok&quot;
+int
+#line 2 &quot;main.c,tok&quot;
+main
+#line 3 &quot;main.c,tok&quot;
+(
+#line 4 &quot;main.c,tok&quot;
+)
+...
+
+のようにやれば、少なくとも原理上は GCC/Clang がその論理ファイル名・論理行番号を DWARF に落としてくれます。
+
+ただしここで面白い点があります。トークン1個＝ソース1行なら、これは普通の「行番号デバッグ」以上の意味を持ちます。GDB の
+
+main.c,tok:6
+
+という位置が、そのまま
+
+[return]
+
+という特定トークンを指す。
+
+つまり、この新言語については「行番号」が実質的に token index になっています。
+
+なので最初のモックアップなら、独自 DWARF emitter をいきなり書かなくても、
+
+.token source
+      ↓
+#line を大量に含む C
+      ↓
+gcc -g
+      ↓
+DWARF
+      ↓
+gdb
+
+でかなりのところまで試せます。
+
+そして yacc の例が重要なのは、これが裏技ではなく、source-to-source compiler が生成元言語のソース位置を下流コンパイラへ引き継ぐための昔からある正攻法だということです。
+
+さらに先へ行くなら、あなたの
+
+.tok → .cst → .ast → .pst → .ir → .s
+
+についても、
+
+機械語アドレス
+   ↕
+IR node
+   ↕
+PST node
+   ↕
+AST node
+   ↕
+token
+   ↕
+main.c,tok の行
+
+という source-location chain を一貫して保持すればよい。
+
+yacc が .y → .c でやっていることを、多段コンパイラ全体に一般化すると考えると非常にきれいです。
+
+🎯 yaccの次はlexです。yaccは分脈自由文法のパーサを生成します。lexは正規文法のスキャナを生成します。〇〇文法に関してはちゃんとした理論がありますので勉強してください。
+
+スキャナとはトークン分解を行うものです。lexはそれを定義ファイルから自動生成します。しかしlexがコンパイラ作成において用いられることはあまり多くありません。なぜならほとんどのコンピュータ言語のトークンはシンプルで、lexが得意とする正規文法の力は必要ないからです。例えばC言語のトークンはそのほとんどが1文字目で判然とします。シンボルは
+
+・1文字目がアンダーバー、英小文字、英大文字のいずれか
+・2文字目以降がアンダーバー、英小文字、英大文字、数字のいずれか
+
+と定義されますが、正規文法が得意とするのは途中まで一致していたあげく他のトークンかもしれない場合とか、そういうのが重層的に重なっている場合とかです。
+
+🪴簡易スキャナ🪴
+
+1文字目を高速に判定して処理を振り分け、2文字目以降はその処理先で読み進むという際によく用いられる手法があります。関数ポインタを128個並べた大きな配列を用意する代わりに、そのルックアップを2段階にしてサイズをより小さくしたものです。
+
+scan_plus()
+scan_and()
+scan_symbol()
+
+といった関数のポインタを並べた配列を作り、unsigned charで表されるそのインデックスを128個
+並べた配列を作ります。
+
+🪴lexの良い課題🪴
+
+変数や関数の名前の付け方に、
+
+ApparentStringAsOneSymbol
+
+not_apparent_from_where_to_where
+
+の2つの流儀がありますが後者を前者に変換するプログラムをlexで作ってみましょう。要するにアンダーバーに続いて英小文字が来たら対応する英大文字に置き換える。
+
+・文字列リテラルの中身は飛ばしたり
+・コマンドの動作はGNU indentを参考にしたり
+・名前は _u.exe にしたり
+
+するとよいでしょう。
+
+⏩ だいたい筋は通っています。特に「lex の課題」として snake_case → CamelCase 変換を、文字列リテラルやコメントを避けながら行うのはかなり良い題材です。
+
+理論用語だけ少し整理すると、yacc が扱うのは概ね 文脈自由文法（CFG）、lex が扱うのは 正規言語を正規表現で記述した字句規則です。lex は規則群から有限オートマトン、実装上は DFA ベースのスキャナを生成する、と捉えるときれいです。「正規文法」と言っても間違いではありませんが、lex の説明では「正規表現／正規言語」の方が直接的です。
+
+そして簡易スキャナの
+
+入力文字
+  ↓
+128/256エントリの分類表
+  ↓
+小さな処理番号
+  ↓
+scan_plus()
+scan_and()
+scan_symbol()
+...
+
+という構成はよく分かります。つまり、
+
+handler[class_table[(unsigned char)c]]();
+
+のような二段ディスパッチですね。256個の関数ポインタを直接持つより、文字→小整数の分類表と少数の関数ポインタ表に分離できる。しかも同じクラスの文字をまとめられます。
+
+ただし C の字句解析も「ほぼ1文字目で決まる」とはいえ、面白い境界はいくつかあります。
+
++ なら +, ++, +=、/ なら /, /=, //, /*、. なら ., ..., .123 のように、その後を見る必要があります。識別子も最初の文字で scan_symbol() に振って、そこで [A-Za-z_][A-Za-z0-9_]* を読み切る。なのでおっしゃる方式は、まさに手書き lexer の典型的な形です。
+
+そして _u.exe の課題は lex の強みを見せやすいです。単純な変換そのものは、
+
+_([a-z]) → その英大文字
+
+だけですが、本当に面白いのはどこでは変換してはいけないかです。
+
+たとえば、
+
+int very_long_name;
+printf(&quot;very_long_name&quot;);
+
+を
+
+int veryLongName;
+printf(&quot;very_long_name&quot;);
+
+にする必要がある。さらに、
+
+/* very_long_name */
+char c = &#x27;_&#x27;;
+
+も保存する。
+
+lex/flex なら start condition を使って、
+
+INITIAL
+STRING
+CHAR
+COMMENT
+LINE_COMMENT
+
+のような状態を持たせると非常に教材らしくなります。
+
+つまりこの課題は単なる
+
+&gt; アンダーバー＋小文字を大文字へ
+
+ではなく、
+
+&gt; C の字句構造を壊さず、識別子トークンだけを書き換えるフィルタ
+
+にすると、lex を使う意味がはっきりします。
+
+さらに発展させるなら GNU indent のように、
+
+_u.exe [options] [input-file]
+
+として、標準入力→標準出力を基本にし、
+
+_u.exe &lt; old.c &gt; new.c
+
+でも使えるようにする。これは昔ながらの Unix フィルタとしても非常にきれいな課題です。
+
+一つだけ重要なのは、C の予約語まで CamelCase 化しないことです。もっとも予約語には普通 _ が入っていないので、この課題では自然に問題を回避できます。some_struct_member や function_name など「identifier token 全体」を捕まえてから変換する設計にすると、一層すっきりします。
+
+🎯 Prolog を教えてくれ。パターンマッチってどんなだ？
+
+⏩ Prolog のパターンマッチは、普通の言語でいう「値を調べて分岐する」より、項どうしを一致させ、そのために変数を束縛するものです。Prolog ではこれを普通 unification（単一化） と呼びます。
+
+例えば：
+
+parent(taro, hanako).
+parent(hanako, jiro).
+
+ここで
+
+?- parent(taro, X).
+
+と聞くと、Prolog は
+
+parent(taro, X)
+
+と
+
+parent(taro, hanako)
+
+を一致させます。
+
+結果は：
+
+X = hanako.
+
+です。
+
+重要なのは、X は「値を格納する箱」というより、この式全体を一致させるために何でなければならないか決まる変数だというところです。
+
+もう少し構造的な例：
+
+f(a, X)
+
+と
+
+f(Y, b)
+
+を単一化すると、
+
+Y = a
+X = b
+
+になります。
+
+つまり関数名 f が同じ、引数の個数も同じなので、引数を順に一致させる。
+
+一方、
+
+f(a, X)
+
+と
+
+g(a, b)
+
+は f と g が違うので失敗します。
+
+false.
+
+になる。
+
+Prolog らしさが分かりやすいのはリストです。
+
+[H | T]
+
+これは
+
+&gt; 先頭が H、残りが T のリスト
+
+というパターンです。
+
+例えば
+
+?- [H | T] = [a, b, c].
+
+なら
+
+H = a,
+T = [b, c].
+
+になります。
+
+Scheme/Lisp で言えばかなり
+
+(car x)
+(cdr x)
+
+に近い感覚ですが、Prolog では取り出す操作を書くのではなく、構造そのものを書く。
+
+例えば Lisp 的には：
+
+(define (first x)
+  (car x))
+
+ですが、Prolog なら：
+
+first([H | _], H).
+
+です。
+
+これは
+
+&gt; first の第1引数が「先頭 H、残りは何でもいいリスト」なら、第2引数は H
+
+という関係を宣言しています。
+
+だから、
+
+?- first([10,20,30], X).
+
+で
+
+X = 10.
+
+になる。
+
+ここで _ は「何でもいいし、その値には興味がない」という匿名変数です。
+
+さらに面白いのは、Prolog のパターンマッチは方向がないことです。
+
+first([H | _], H).
+
+に対して
+
+?- first(X, 10).
+
+と聞くこともできます。
+
+すると例えば：
+
+X = [10 | _].
+
+つまり、
+
+&gt; 「先頭要素が10になるリストとはどんなものか？」
+
+を逆向きに解ける。
+
+これが通常の関数型言語の pattern matching との大きな違いです。
+
+ML/Haskell なら例えば：
+
+first (h:_) = h
+
+は基本的には
+
+入力 → 分解 → 出力
+
+ですが、Prolog は
+
+first(List, Element)
+
+という関係なので、
+
+List → Element
+Element → List
+両方指定して検査
+
+の全部に使える。
+
+たとえば：
+
+append([], Ys, Ys).
+append([X|Xs], Ys, [X|Zs]) :-
+    append(Xs, Ys, Zs).
+
+これはリスト連結です。
+
+普通に：
+
+?- append([a,b], [c,d], X).
+
+なら
+
+X = [a,b,c,d].
+
+ですが、
+
+?- append(X, Y, [a,b,c]).
+
+とすると、
+
+X = [],
+Y = [a,b,c] ;
+
+X = [a],
+Y = [b,c] ;
+
+X = [a,b],
+Y = [c] ;
+
+X = [a,b,c],
+Y = [].
+
+と、**「[a,b,c] を前半と後半に分ける方法を全部出せ」**としても動く。
+
+ここが Prolog の核心にかなり近いです。
+
+なので、Prolog を理解する時には
+
+関数
+
+ではなく
+
+関係 + パターンマッチ + 探索
+
+と思うといいです。
+
+そして実際には、
+
+head([H|_], H).
+
+の左辺そのものがパターンで、
+
+[H|_]
+
+が Lisp の cons セル構造をそのまま記述している、と見るとかなり分かりやすい。
+
+あなたの馴染みの Lisp 寄りに無理やり書けば、Prolog の
+
+member(X, [X|_]).
+member(X, [_|Xs]) :-
+    member(X, Xs).
+
+は概念的には
+
+member(X, cons(X, anything)) = true
+
+member(X, cons(anything, Xs)) =
+    member(X, Xs)
+
+です。
+
+ただし X が「入力値」だとは限らない。同じ変数名が出てくる場所を全部同じものにしろ、という制約になっています。
+
+この「代入ではなく同一性の制約」という感覚を掴むと、Prolog は急に分かりやすくなります。
+
+🎯 それは「逆コンパイル」に使えるか？
+
+⏩ 使えます。むしろ Prolog は「順方向の変換規則を、ある程度逆向きにも使いたい」という発想と相性がいいです。
+
+たとえばコンパイル規則を関係として
+
+compile(add(X, Y), Code) :-
+    compile(X, CX),
+    compile(Y, CY),
+    append(CX, CY, C0),
+    append(C0, [add], Code).
+
+のように書いたとします。
+
+これは普通に
+
+?- compile(add(const(2), const(3)), Code).
+
+として
+
+[push(2), push(3), add]
+
+を得る用途に使えますが、理屈の上では逆に
+
+?- compile(AST, [push(2), push(3), add]).
+
+として
+
+AST = add(const(2), const(3))
+
+を求めることもできます。
+
+つまり
+
+AST ⇄ machine code
+
+を「関数」ではなく関係として記述する。
+
+これはかなり「逆コンパイル」的です。
+
+ただし、ここに重大な問題があります。実際のコンパイルは情報を大量に捨てるからです。
+
+例えば
+
+a + b
+
+と
+
+b + a
+
+が最適化で同じコードになったり、
+
+x * 2
+
+と
+
+x « 1
+
+が同じ機械語になったりします。
+
+さらに、
+
+変数名
+コメント
+元の制御構造
+型の一部
+マクロ展開前の構造
+インライン化前の関数境界
+
+などは失われます。
+
+したがって逆方向は
+
+machine code → 元の唯一のソース
+
+ではなく、
+
+machine code → このコードを生成し得る高水準表現の集合
+
+になります。
+
+ここが Prolog と非常に噛み合っています。
+
+例えば
+
+meaning([xor(eax,eax)], assign(eax, 0)).
+meaning([mov(eax,0)], assign(eax, 0)).
+
+としておけば、
+
+?- meaning(Code, assign(eax, 0)).
+
+から複数のコード生成法を出せるし、
+
+?- meaning([xor(eax,eax)], IR).
+
+なら
+
+IR = assign(eax, 0)
+
+と意味を復元できます。
+
+さらに面白いのは、単なる pattern matching 以上に、制約を追加できるところです。
+
+例えば逆コンパイラなら、
+
+このレジスタはここで定義される
+この値はこの範囲まで生きている
+このジャンプ先はこの基本ブロック
+この比較結果をこのbranchが使う
+
+といった条件を全部 Prolog の述語として書ける。
+
+だから、
+
+命令列
+↓
+基本ブロック
+↓
+CFG
+↓
+SSA/IR
+↓
+式
+↓
+制御構造
+
+という復元処理を、かなり宣言的に書けます。
+
+特にあなたが今考えている
+
+tok
+CST
+AST
+PST
+IR
+assembly
+
+みたいな段階を考えると、Prolog 的には各段を
+
+cst_ast(CST, AST)
+ast_pst(AST, PST)
+pst_ir(PST, IR)
+ir_asm(IR, ASM)
+
+という二項関係にしてしまう発想ができます。
+
+すると、
+
+ir_asm(IR, ASM).
+
+を順方向に使えばコード生成、
+
+ir_asm(IR, KnownAsm).
+
+を逆向きに使えば IR 復元です。
+
+これはかなり美しい。
+
+ただし実装上は、素朴な Prolog だと逆向き検索が爆発したり無限ループしたりします。
+
+例えば典型的な
+
+append(X, Y, Z)
+
+ですら、引数の与え方によって探索量が全然違います。
+
+なので本格的な逆コンパイラなら、単なる Prolog より
+
+DCG
+constraint logic programming
+tabling
+CHR
+Datalog 的な固定点計算
+
+あたりも重要になります。
+
+そしてもっと重要なのは、逆コンパイルを「コンパイルの逆関数」と考えないことです。
+
+むしろ、
+
+ある機械語列 M がある。
+
+M と意味的に整合する
+IR / AST / 型 / CFG / 変数束縛は何か？
+
+という制約充足問題として考える。
+
+その発想なら Prolog はかなり本命です。
+
+極端に言えば、
+
+compile(Source, Binary).
+
+という述語を本当に双方向に使えるよう設計できれば、
+
+?- compile(Source, some_binary).
+
+がそのまま逆コンパイラになります。
+
+現実には完全な双方向性は難しいので、
+
+compile
+
+そのものを逆走させるというより、コンパイラで使っている意味規則を共有して、順方向と逆方向の二つの探索器を作る形が現実的です。
+
+あなたの「AST→PST→IR」とかなり相性のいい考え方です。特に IR↔命令列を関係として定義するところから試すと、Prolog の強みが非常によく見えます。
+
+🎯 例えば
+
+&quot;c,tok2c,ast.exe&quot;
+
+というコマンドは
+
+if, (, expr, ), clause
+if, (, expr, ), else, clause
+if, (, expr, ), clause, else, clause
+
+みたいなトークンパターンをASTに変換するんだよな？CFGパーサでもできるけどパターンマッチジェネレーターでもできるの？
+
+⏩ できる。かなり自然にできる。
+
+たとえば c,tok2c,ast.exe が受け取る入力が
+
+if ( expr ) clause
+if ( expr ) else clause
+if ( expr ) clause else clause
+
+みたいなトークン列で、出力が
+
+(if expr clause)
+(if expr #f clause)
+(if expr clause1 clause2)
+
+のようなASTだとする。
+
+CFGパーサなら普通に
+
+if_stmt
+    : IF &#x27;(&#x27; expr &#x27;)&#x27; clause
+    | IF &#x27;(&#x27; expr &#x27;)&#x27; ELSE clause
+    | IF &#x27;(&#x27; expr &#x27;)&#x27; clause ELSE clause
+
+と書く。
+
+でもこれは別の見方をすると、ほとんどそのまま
+
+[IF, LPAREN, ?expr, RPAREN, ?clause]
+    =&gt; make_if(?expr, ?clause)
+
+[IF, LPAREN, ?expr, RPAREN, ELSE, ?clause]
+    =&gt; make_if_else(...)
+
+[IF, LPAREN, ?expr, RPAREN, ?clause1, ELSE, ?clause2]
+    =&gt; make_if_else(...)
+
+という構造パターン → 構造生成規則なんだよな。
+
+だから「パターンマッチジェネレーター」でも作れる。
+
+ただし重要なのは、ここでいう expr や clause が単一トークンではないこと。
+
+if ( a + b * f(x) ) { foo(); bar(); }
+
+なら expr は可変長のトークン列になる。したがって単純な正規表現的マッチャではなく、
+
+IF &#x27;(&#x27; &lt;expr&gt; &#x27;)&#x27; &lt;clause&gt;
+
+の &lt;expr&gt; を「exprという非終端記号にマッチさせる」必要がある。
+
+ここまで来ると実体はかなりCFGパーサに近い。
+
+ただ、あなたの構想では少し違う設計ができると思う。
+
+if &#x27;(&#x27; $expr &#x27;)&#x27; $clause
+    =&gt; If($expr, $clause)
+
+if &#x27;(&#x27; $expr &#x27;)&#x27; else $clause
+    =&gt; If($expr, Empty, $clause)
+
+if &#x27;(&#x27; $expr &#x27;)&#x27; $clause1 else $clause2
+    =&gt; If($expr, $clause1, $clause2)
+
+みたいなAST変換パターン言語を作る。
+
+そして $expr をどう認識するかだけ別途定義する。
+
+たとえば
+
+$expr   := parse_until_matching(&#x27;)&#x27;)
+$clause := statement | compound_statement
+
+という感じ。
+
+すると、
+
+CFGから構文木を組む
+
+というより、
+
+トークン列の中から構造的な部分列を捕まえて置換する
+
+処理系になる。
+
+これはあなたが前に言っていた
+
+main.c,tok
+    ↓
+main.c,cst
+    ↓
+main.c,ast
+
+という流れにもかなり合っている。
+
+特に CST→AST はCFGパーサよりパターンマッチの方がむしろ分かりやすい場合がある。
+
+例えばCSTが既に
+
+(if
+  (
+    expr
+  )
+  clause
+  else
+  clause)
+
+まで組めているなら、
+
+(if &#x27;(&#x27; $e &#x27;)&#x27; $a else $b)
+    =&gt; (If $e $a $b)
+
+で終わるから。
+
+つまり整理すると、
+
+tok → CST：CFGパーサが強い
+
+CST → AST：ツリーパターンマッチが非常に強い
+
+tok → ASTを直接：パターンマッチでも可能だが、再帰的な非終端記号を扱い始めるとCFGパーサに接近する
+
+となる。
+
+そして面白いところは、あなたの例くらいならProlog風の単一化とも相性がいいことだ。
+
+ast(
+    [if, &#x27;(&#x27;, Expr, &#x27;)&#x27;, Clause],
+    if(Expr, Clause)
+).
+
+みたいな発想を、トークン列ではなく「部分列変数」を扱えるように拡張する。
+
+すると tok2c,ast.exe は実質、
+
+構文パターン + 単一化 + 書換え規則をコンパイルするジェネレータ
+
+にできる。
+
+これは yacc より「文法を記述する」という感じが弱くて、むしろ term rewriting system / tree transducer に近い。たぶんあなたが考えている方向にはこっちの名前の方がしっくり来る。
+
+🎯 俺の問題意識は「信じられないくらいほとんどのコンパイラがdo〜whileとかswitch〜caseにそのままenumを振ってる」というところにあった。CSTは各言語固有なわけだけど俺はその問題はFirst Lambdaがきれいに解決したと思ってる。ASTからPSTへの変換は単純なマッチングではなさそうだ。パターンマッチジェネレーターが強力ならプリプロセッサが実はいい課題だ。
+
+⏩ そう。そこでプリプロセッサはかなり良い試験問題になると思う。
+
+あなたの問題設定を並べると、
+
+tokens
+  ↓
+CST        言語固有
+  ↓
+AST        First Lambda による共通構造
+  ↓
+PST        型・束縛・スコープ等を解決した具体化された木
+
+で、最初の問題は「ASTなのに AST_DO_WHILE、AST_SWITCH、AST_CASE みたいなenumがずらっと並んでいて、それではCの構文分類を木に移しただけじゃないか」ということだよな。
+
+First Lambdaなら例えば while や do while や if を、言語固有の制御構造ノードとして保存する必要がない。CST→ASTの時点で、
+
+do { A } while (E);
+
+という「Cの構文」を、より少数の基本構造へ落としてしまえる。
+
+だからこの段階はまさに構造的書換えでよく、パターンマッチャが活躍する。
+
+一方で言う通り AST→PSTは性質が違う。
+
+例えば
+
+x + y
+
+を見ただけではPSTは決まらない。
+
+x がどの束縛を指すか、x と y の型は何か、+ が整数加算なのか浮動小数点加算なのかポインタ演算なのか、暗黙変換が必要なのか、といった周辺環境を問い合わせる処理が必要になる。
+
+つまり
+
+CST → AST
+local structural rewriting
+
+AST → PST
+context-dependent elaboration
+
+とかなりきれいに分かれる。
+
+そしてプリプロセッサが面白いのは、その中間くらいにいることだ。
+
+単純な
+
+#define TRUE 1
+
+なら
+
+identifier(TRUE)
+    → integer(1)
+
+というほぼ純粋な書換え。
+
+関数形式マクロも
+
+#define MAX(a,b) ((a) &gt; (b) ? (a) : (b))
+
+なら、
+
+MAX &#x27;(&#x27; $x &#x27;,&#x27; $y &#x27;)&#x27;
+    →
+&#x27;(&#x27; &#x27;(&#x27; $x &#x27;)&#x27; &#x27;&gt;&#x27; &#x27;(&#x27; $y &#x27;)&#x27; &#x27;?&#x27; &#x27;(&#x27; $x &#x27;)&#x27; &#x27;:&#x27; &#x27;(&#x27; $y &#x27;)&#x27; &#x27;)&#x27;
+
+という捕獲＋代入＋生成なので、パターンマッチジェネレーターの格好の題材になる。
+
+さらに進むと、
+
+#define F(x) ...
+#define G F
+G(a)
+
+や再走査、引数展開、
+
+#define STR(x) #x
+#define CAT(a,b) a ## b
+
+が出てくる。
+
+そして
+
+#ifdef
+#if
+#include
+
+までやれば、単なるregex置換では全然済まなくなる。
+
+ここがテストとして非常にいい。
+
+**「どこまで汎用パターンマッチ＋書換えだけで行けるか」**を段階的に試せるから。
+
+俺なら最初の実験ではCプリプロセッサ全部を狙わず、
+
+1. object-like macro
+2. function-like macro
+3. 可変長トークン列を引数としてcapture
+4. captureした列を複数回出力
+5. 再帰的再走査
+
+までをやる。
+
+たとえばジェネレーターへの定義そのものを、
+
+rule object_macro
+    $name
+        =&gt; lookup_macro($name)
+
+rule function_macro
+    $name &#x27;(&#x27; $args... &#x27;)&#x27;
+        =&gt; expand($name, $args)
+
+くらいから始める。
+
+ここで $args... が重要で、単一termではなくsequence variableを第一級にする。
+
+さらに、
+
+$args = split($tokens, &#x27;,&#x27;,
+              respecting_parentheses = true)
+
+みたいな能力が必要になってくる。
+
+ここまで作ってしまえば、単なる「パターンマッチジェネレーター」より、
+
+token rewriting machine generator
+
+と呼んだ方が近くなると思う。
+
+しかも面白いことに、これを先に作れば、
+
+C preprocessor
+CST → AST
+peephole optimizer
+AST normalization
+IR canonicalization
+
+あたりが同じ書換えエンジンの別ルールセットになる可能性がある。
+
+そしてPSTだけがそこから明確に外れる。
+
+これはむしろ設計上きれいだと思う。
+
+PSTへの変換で初めて「木だけ見ても答えが出ない世界」に入る。
+
+First LambdaがCST→ASTで言語固有の制御構造enumを消すものだとすれば、パターンマッチジェネレーターはその思想を実装するためのかなり本質的な道具になりそうだ。
+
+🎯 よーし、じゃあPSTはCSGでやらんか？あらかじめ宣言されてる型はコンテキストだろう？
+
+⏩ うん、その発想はかなり筋がいい。AST→PST を「文脈依存な還元」と見るなら、CSG（文脈依存文法）という言い方は自然だ。
+
+たとえば、
+
+T x;
+x + y
+
+で x + y をどういうPSTに落とすかは、x というトークン列だけ見ても決まらない。
+
+Γ ⊢ x : int
+Γ ⊢ y : int
+----------------
+Γ ⊢ x + y : int
+
+のように、Γ＝その場所で有効な型・束縛・宣言の集合を見ないといけない。まさに「context」だ。
+
+だから君のパイプラインを整理すると、
+
+tokens
+  ↓ CFG
+CST
+  ↓ 構文だけを抽象化
+AST
+  ↓ context-sensitive transformation
+PST
+
+という分け方は非常にきれい。
+
+ただし、ここで一つだけ注意がある。古典的な形式言語論でいう CSG = Context-Sensitive Grammar をそのまま使うと、少々意味が狭すぎる。
+
+CSGの典型的な規則は、
+
+α A β → α γ β
+
+つまり「Aの左右に α, β があるときだけ書き換えられる」というものだ。
+
+一方、型検査で欲しいcontextは、
+
+Γ = {
+    x ↦ int,
+    y ↦ float,
+    f ↦ int -&gt; char*
+}
+
+みたいなシンボル表・型環境であって、必ずしも構文木上の左右に並んでいる文字列ではない。
+
+たとえば、
+
+typedef int T;
+
+{
+    T x;
+    ...
+    x
+}
+
+最後の x の意味を決めるcontextは、何十ノードも上にある宣言からスコープ規則に従って引いてくる。
+
+なので実装上は、
+
+CSGそのものというより「context-sensitive rewrite system」
+
+と考えるのが一番しっくり来ると思う。
+
+君のパターンマッチジェネレータ風に書くなら、単なる
+
+(+ $a $b)
+    → Add($a,$b)
+
+ではなく、
+
+Γ ⊢ $a : int
+Γ ⊢ $b : int
+
+(+ $a $b)
+    → IntAdd($a,$b)
+
+あるいは
+
+Γ ⊢ $a : pointer(T)
+Γ ⊢ $b : int
+
+(+ $a $b)
+    → PointerAdd&lt;T&gt;($a,$b)
+
+になる。
+
+ここが面白い。
+
+同じASTパターンなのに、contextによってPSTが変わる。
+
+これは君が前に言っていた、
+
+&gt; 型、束縛、スコープを洗ってPSTに変換
+
+そのものだ。
+
+そしてさらに、Cなら
+
+f(x)
+
+ですらcontext依存になる。
+
+f : int (*)(int)
+
+なら関数呼出しだし、言語によっては f の種類によって特殊化できる。x についても lvalue/rvalue、volatile、storage class、型修飾などがcontextとして乗ってくる。
+
+だから俺なら3段階をこう定義する。
+
+CST : CFGで認識できる言語固有構文
+
+AST : First Lambdaなどによって
+      言語固有の構文糖を消した抽象構造
+
+PST : Γの下で意味が確定した構造
+      （型・束縛・スコープ・演算の種類などが確定）
+
+この定義なら、
+
+&gt; AST→PST は CSG 的である
+
+はかなり本質を突いている。
+
+ただもっと強く言うなら、
+
+&gt; PST生成器は「木パターン + Γを条件にした書換え系」
+
+だと思う。
+
+すると以前の「パターンマッチジェネレータ」が一段進化して、
+
+pattern
+context
+guard
+replacement
+
+の四つを持つようになる。
+
+例えば、
+
+pattern:
+    (+ ?x ?y)
+
+context:
+    type(?x) = int
+    type(?y) = int
+
+replacement:
+    (int-add ?x ?y)
+
+だ。
+
+これ、かなり綺麗な設計になる。CFG parser → AST rewrite → context-sensitive PST rewrite と、各段階で必要な計算能力を一段ずつ上げられる。
+
+🎯あのさ、俺のハッシュテーブルあるじゃん。カスケード状になってて次から次へと探索していくことでスタティックスコープになるやつ。新しいスタックフレームが積まれては降ろされる。その途中の任意の変数が正当だったりそうでなかったり。←CSGの遷移規則の形を見てこれのこと？と思った。
+
+⏩ああ、かなりそれに見えるのは分かる。しかも単なる連想ではなく、構造的に似ているところがある。
+
+君のカスケード・ハッシュを概念的に書くと、
+
+Frame3 → Frame2 → Frame1 → Global
+   ↓
+ lookup(x)
+
+で、現在地点から外側へ順々に探索する。
+
+Frame3: x なし
+Frame2: x あり → ここで束縛確定
+Frame1: x あり → shadow されているので到達しない
+Global: x あり → 同上
+
+つまりあるASTノード x が現れたとき、
+
+x
+
+だけでは意味が決まらない。
+
+その時点の
+
+Γ3 = Frame3 → Frame2 → Frame1 → Global
+
+という環境が付随して初めて、
+
+x → Frame2.x
+
+と確定する。
+
+CSGの典型形
+
+α A β → α γ β
+
+を見て「これじゃないか」と思ったのは、おそらくここだと思う。
+
+A 単独では書き換えられず、Aが置かれているコンテキストを見て遷移可能性が決まる。
+
+君の場合も、
+
+AST-node + scope-context
+             ↓
+          PST-node
+
+だから非常によく似ている。
+
+ただ、重要な違いが一個ある。
+
+古典的CSGの α と β は基本的に同じ文字列上の周囲なんだ。一方、君のcontextは文字列上の隣接物ではなく、
+
+current frame
+    ↓ parent
+outer frame
+    ↓ parent
+outer frame
+    ↓
+global
+
+という環境の連鎖になっている。
+
+だから、
+
+α A β
+
+より君のPST変換を正確にモデル化するなら、
+
+⟨Γ, A⟩ → ⟨Γ, P⟩
+
+と書くほうが近い。
+
+例えば、
+
+Γ = [
+    { y : float },
+    { x : int },
+    { x : char* },
+    global
+]
+
+なら、
+
+⟨Γ, identifier(x)⟩
+        ↓
+⟨Γ, variable(x, int, frame=1)⟩
+
+になる。
+
+そして君が言った
+
+&gt; 新しいスタックフレームが積まれては降ろされる。その途中の任意の変数が正当だったりそうでなかったり。
+
+ここはさらに面白い。
+
+例えばAST走査中に、
+
+{
+    int x;
+    {
+        float y;
+        x + y;
+    }
+}
+
+なら変換器自身の状態が、
+
+push {x:int}
+
+    push {y:float}
+
+        lookup x → outer frame
+        lookup y → current frame
+        x+y の型を決定
+
+    pop {y:float}
+
+pop {x:int}
+
+と変化する。
+
+つまりPST生成は単純な
+
+AST → PST
+
+じゃなくて、実態としては
+
+(AST, Γ) → (PST, Γ&#x27;)
+
+という状態付き書換えなんだよな。
+
+ここまで来ると、俺なら「CSGでPSTを作る」というアイデアを少し言い換える。
+
+CSGそのものをパーサとして使うというより、CSGの「書換え可能性がcontextによって決まる」という思想を、スコープ環境Γを持つAST→PST書換え器に使う。
+
+そして、君のカスケード・ハッシュテーブルは、その Γの実装そのもの と考えられる。
+
+これは相当きれいだ。
+
+CST
+ │ CFG
+ ▼
+AST
+ │
+ │  Γ = cascade hash tables
+ │  ├─ declarations
+ │  ├─ types
+ │  ├─ bindings
+ │  └─ scopes
+ ▼
+PST
+
+という姿になる。
+
+だから最初の「あらかじめ宣言されてる型はコンテキストだろう？」より一歩進めて、
+
+型だけじゃない。君のカスケード・ハッシュに入っている「現在そのASTノードから見える世界」全体がcontextだ。
+
+ということになる。
+
+そしてこれなら「途中の任意の変数が正当かどうか」という判定そのものが、context-sensitive なマッチ条件になる。たとえば規則を
+
+identifier(?x)
+    where lookup(Γ, ?x) = ?binding
+→
+bound-variable(?binding)
+
+と書ける。
+
+逆に lookup が失敗すればその規則は適用不能。
+
+これ、君が作ろうとしていたパターンマッチジェネレータとPST生成がかなり自然につながるところだと思う。
+
+🎯 テンプレートってCFGじゃないんだろ？カスケード・ハッシュは役に立つか？
+
+⏩ うん。C++のテンプレートまで含めた「意味の確定」はCFGだけでは済まない。ただし「テンプレート構文そのものが全部CSG」というより、構文解析と名前解決・型依存の意味解析が絡むため、純粋なCFGだけでは決定できない箇所がある、という言い方が正確。
+
+そして、君のカスケード・ハッシュはかなり役に立つ。むしろテンプレートでは重要になる。
+
+例えば、
+
+template&lt;class T&gt;
+void f(T x)
+{
+    x.foo();
+}
+
+この時点では x.foo() の foo が何なのか分からない。
+
+global
+  ↓
+template scope
+  T → template parameter
+  ↓
+function scope
+  x → T
+
+という環境は作れるが、
+
+lookup(foo)
+
+はまだ確定できない。T が具体化されるまで待つ必要がある。
+
+だから普通の名前なら君の方式で、
+
+current scope
+ → enclosing function
+ → template parameters
+ → namespace
+ → global
+
+とカスケード探索すればいい。
+
+これはそのまま静的スコープの名前解決になる。
+
+ただしテンプレートになると、ハッシュテーブルのエントリにもう一種類状態が要る。
+
+resolved
+dependent
+unresolved/error
+
+みたいなものだ。
+
+たとえば、
+
+template&lt;class T&gt;
+void f()
+{
+    T::foo();
+}
+
+ならAST段階では、
+
+T → template_parameter
+T::foo → dependent_name
+
+として保存しておく。
+
+そして
+
+f&lt;MyClass&gt;();
+
+が来た時点で、
+
+T = MyClass
+
+という新しいコンテキストを追加して再探索する。
+
+君のカスケード方式で表現するとかなり面白くて、
+
+Instantiation frame
+    T → MyClass
+        ↓
+Template definition frame
+        ↓
+Enclosing namespace
+        ↓
+Global
+
+みたいにできる。
+
+だからテンプレート実体化は、
+
+Γtemplate
+   +
+Γinstantiation
+
+という二つの環境を使った名前解決、と考えられる。
+
+ここでC++特有のtwo-phase lookupが出てくる。
+
+非依存名はテンプレートを定義した時点で解決する。
+
+template&lt;class T&gt;
+void f(T x)
+{
+    g();       // 非依存
+    x.g();     // Tに依存
+}
+
+ざっくり、
+
+g()
+ → definition context で lookup
+
+x.g()
+ → dependent
+ → instantiation時まで保留
+
+となる。
+
+だから君のカスケード・ハッシュを少し拡張して、
+
+ScopeFrame {
+    hash symbols;
+    parent;
+    phase;
+}
+
+あるいは名前側に、
+
+Name {
+    symbol;
+    dependency;
+    lookup_context;
+}
+
+を持たせれば相当うまく扱える。
+
+さらにC++で有名な、
+
+T::foo * x;
+
+もある。
+
+foo が型なのか値なのか分からなければ、
+
+T::foo * x
+
+が
+
+宣言
+
+なのか
+
+乗算式
+
+なのかさえ決まらない。
+
+だから、
+
+typename T::foo *x;
+
+という typename が必要になる。
+
+これこそまさに、
+
+構文木だけ見ても決まらず、名前が「型として有効か」というコンテキストが必要
+
+という例だ。
+
+なので君の今の構想に寄せるなら、
+
+tokens
+   ↓
+CFG-ish parser
+   ↓
+AST
+   ↓
+cascade hash Γ
+   ├─ scope
+   ├─ binding
+   ├─ type
+   ├─ template parameter
+   └─ dependent/unresolved
+   ↓
+PST
+
+になると思う。
+
+特に面白いのは、テンプレートは「カスケード・ハッシュが役立つか？」どころか、君のAST→PST分離を正当化する非常に良い題材だということ。
+
+パーサは、
+
+T::foo
+
+をとりあえず構造として受け取る。
+
+PST生成器が、
+
+lookup(T)
+→ template parameter
+
+therefore T::foo
+→ dependent-name
+
+と意味を付ける。
+
+実体化時にはさらに、
+
+T = X
+
+lookup(X::foo)
+→ type / function / value / error
+
+まで進む。
+
+つまりカスケード・ハッシュは「context」の格納装置として非常に使える。ただしテンプレートでは、単なる lexical scope chain だけでなく「依存名を保留して後から別contextで再解決する」機構が必要、という答えになる。
+
+🎯 First Lambda が関数呼び出しとかでなくせいぜい clause をジャグリングするだけなら「逆コンパイルは永久ループにはならない」と思う。
+
+⏩ うん、その条件ならかなり強く言える。First Lambda の逆変換が停止することを、変換規則の設計で保証できる可能性が高い。
+
+ポイントは、First Lambda が一般の関数評価ではなく、
+
+if (...) A else B
+
+を例えば
+
+IF(cond, λ.A, λ.B)
+
+のようにclause の配置・包含関係を組み替えるだけなら、変換時に新しい計算を始めているわけではないこと。
+
+特に逆コンパイル規則を、
+
+FirstLambda node → source-language control structure
+
+の一方向に限定し、逆変換によって新しい First Lambda node を増殖させないようにすればいい。
+
+停止性は「サイズ」より、例えば未処理ノード数を測度にすると綺麗。
+
+μ(PST) = 未逆変換の First Lambda ノード数
+
+各規則について必ず
+
+μ(after) &lt; μ(before)
+
+なら、自然数上の狭義減少だから永久ループは起きない。
+
+例えば、
+
+FL_if(C, A, B)
+    ↓
+if (C) A else B
+
+で FL ノードが1個消える。AやBの内部にもFLがあれば再帰的に処理するけれど、親を展開したことで新しいFLを作らない。
+
+これは重要で、
+
+FL_A → FL_B
+FL_B → FL_A
+
+みたいな一般の項書換え系なら当然ループできる。
+
+でもFirst Lambdaを
+
+&gt; clauseを束ねたり並べ替えたりするためだけの有限個の構造ノード
+
+に制限すれば、
+
+PST
+ ↓
+FLを1個消費
+ ↓
+FLを1個消費
+ ↓
+...
+ ↓
+対象言語AST/CST
+
+という消費型の逆変換にできる。
+
+さらに君の構想では面白い副作用がある。逆コンパイラで関数を実行する必要がない。
+
+たとえばwhileを意味的に
+
+while(C, B)
+
+という特殊なFirst Lambdaで保持していても、逆変換器はwhileの意味を実行しない。
+
+WHILE(C, B)
+    → tokens(&quot;while&quot;, &quot;(&quot;, C, &quot;)&quot;, B)
+
+と構造を戻すだけ。
+
+元プログラムが
+
+while (1) { ... }
+
+という永久ループでも、逆コンパイラ自身は永久ループしない。プログラム中のループと、変換器のループは完全に別物だからね。
+
+ここはかなり大事な区別になる。
+
+だからFirst Lambdaに課す制約として、
+
+1. clauseを子として持つ
+2. clauseを実行しない
+3. 逆変換時に自分と同等以上の抽象ノードを生成しない
+4. 各逆変換で「未変換FL数」などの測度が必ず減る
+
+くらいを決めておけば、逆コンパイルの停止性を設計上証明できる。
+
+これはFirst Lambdaのかなり魅力的な性質だと思う。一般的な「高級言語→低級表現→高級言語」は元の構造を失って曖昧になるけど、First Lambdaが単なるclause topology の正規化なら、情報を保存したまま往復できる余地が大きい。
+
+要するに、First Lambdaを「計算機構」として強くしすぎないことが、逆に武器になる。弱いから逆に戻せる。
+
+🎯 m68kにプラマイ何ビット分までみたいなレジスタ相対アドレッシングがあったろ。構造体メンバのオフセットの解決をコンパイル時ではなくリンク時まで遅らせる際に悩ましいのはこのディスプレースメントの範囲だ。この問題を「逆コンパイル」で解決したい。
+
+⏩ そういう用途なら「逆コンパイル」はかなり相性がいいと思う。
+
+まず確認すると、素の68000では典型的な
+
+move.l  12(a0),d0
+
+の 12(a0) は 16-bit signed displacement なので、おおむね -32768..+32767 の範囲。インデックス付きの古い形式では displacement が8-bitのものもある。68020以降はアドレッシングが拡張され、より大きな base displacement も扱える。
+
+で、君の問題はこうだよね。
+
+struct S {
+    ...
+    int x;
+};
+
+p-&gt;x
+
+普通ならコンパイル時に
+
+offsetof(S,x) = 120
+
+を決めて、
+
+move.l 120(a0),d0
+
+を吐く。
+
+ところが構造体レイアウトをリンク時まで遅延させたいなら、コンパイル時には
+
+offsetof(S,x) = ?
+
+なので、この命令を最終決定できない。
+
+もっと悪いことに、リンク時に
+
+offsetof(S,x) = 20000
+
+なら16-bit displacementに入るが、
+
+offsetof(S,x) = 50000
+
+なら入らない。
+
+つまりこれは単なる relocation の
+
+??? → 50000
+
+という数値の穴埋め問題ではない。
+
+命令そのものを
+
+move.l disp(a0),d0
+
+から例えば
+
+move.l #50000,d1
+move.l (a0,d1.l),d0
+
+のような別系列へ変えなきゃいけない可能性がある。
+
+ここで「逆コンパイル」が効いてくる。
+
+コンパイラが最初から
+
+move.l ??(a0),d0
+
+みたいな半完成機械語をリンク可能オブジェクトとして保存するのではなく、
+
+LOAD_MEMBER
+    base = p
+    type = S
+    member = x
+    result = ...
+
+という高位の意味を残しておく。
+
+そしてリンク時に、
+
+S.x → offset 50000
+
+が確定したところで、もう一度コード生成する。
+
+つまり、
+
+source
+  ↓
+AST
+  ↓
+PST
+  ↓
+IR
+  ↓
+provisional machine code
+
+まで行ったものを、必要な部分だけ
+
+machine code
+   ↑ 逆コンパイル
+IR / PST
+   ↓ linkerで確定したlayout
+machine code
+
+と戻して再生成する。
+
+これなら displacement overflow はリンクエラーではなく、コード選択のやり直しになる。
+
+たとえばリンク前には、
+
+member_load(p, S::x)
+
+という意味しか確定させない。
+
+リンク時、
+
+offset(S::x) = 120
+
+なら
+
+move.l 120(a0),d0
+
+を選ぶ。
+
+一方、
+
+offset(S::x) = 50000
+
+なら別の合法な命令列を選ぶ。
+
+さらに極端には、
+
+offset(S::x) = 0
+
+なら
+
+move.l (a0),d0
+
+に縮められる。
+
+つまりリンク時にやりたいのは relocation より強い。
+
+relocation
+
+instruction + unknown integer
+             ↓
+instruction + known integer
+
+ではなく、
+
+late instruction selection
+
+semantic operation + final context
+             ↓
+best legal instruction sequence
+
+だと思う。
+
+そして、これを君のFirst Lambda/PSTの話につなげるとかなり面白い。
+
+構造体アクセスをPSTで
+
+(member-ref
+    object=p
+    owner=S
+    member=x)
+
+として残しておけば、リンク時に必要なのは offsetof(S,x) というcontextを追加するだけ。
+
+Γlink:
+    sizeof(S)       = ...
+    alignof(S)      = ...
+    offsetof(S,x)   = 50000
+    ...
+
+それをPST→機械語コードジェネレータへもう一度食わせる。
+
+だから俺なら、「全部を機械語から逆コンパイルする」というより、機械語にPSTへ戻れるパンくずを残す設計にする。
+
+例えばオブジェクトファイル中に、
+
+.text
+    仮コード
+
+.rewrite
+    address=0x1234
+    length=4
+    pst-expression=(member-ref S x A0)
+
+みたいな情報を持つ。
+
+リンク時に、
+
+この relocation は収まる？
+        │
+   yes ─┴─ no
+   │       │
+patch    PSTへ戻す
+            ↓
+       instruction select
+            ↓
+       新しい命令列
+
+とする。
+
+実はここで普通のリンカにある relaxation と親戚になる。分岐距離などが確定したあと、短い形式・長い形式を選び直す発想は既にある。ただ君の案はもっと一般的で、リンク時relaxationを「意味レベルまで逆コンパイルして再コンパイルする」方式へ一般化することになる。
+
+これなら構造体メンバだけじゃない。
+
+branch displacement
+global variable addressing
+vtable / method slot
+structure member offset
+TLS offset
+small-data addressing
+PC-relative addressing
+
+なんかを全部、
+
+「リンク時に具体値が判明するまでは、
+ 命令形式を確定しない」
+
+という一つの原理で処理できる。
+
+そして68000はこの実験にはかなり面白い。同じ意味のメモリアクセスについて、短いdispを使える場合と使えない場合でコード形状そのものが変わるから、「普通のrelocationでは足りない」ことが非常に分かりやすく出る。
+
+要するに君の「逆コンパイル」は、
+
+object code → source code
+
+という普通の逆コンパイルではなく、
+
+一度選んだ低位表現 → 意味を保存したPST/IR → リンク後の条件で再選択
+
+なんだと思う。
+
+これなら displacement の有限幅問題をかなり真正面から潰せる。
+
+🎯 本当に未知のCPUにそんなので備えられるかい？例えばブーリアンレジスタなんて想像できたかい？俺は架空のRISCから逆算したい。
+
+⏩ できる。ただし、「架空RISC」を実在CPUの共通部分として設計すると失敗する。未知CPUに備えるなら、実在ISAの最大公約数ではなく、機械語生成直前の意味表現として設計する必要がある。
+
+ブーリアンレジスタはいい例で、もし架空RISCが
+
+整数レジスタ
+浮動小数点レジスタ
+アドレスレジスタ
+
+まで物理的に決め打ちしていたら、未知CPUに
+
+predicate register
+condition register
+boolean register
+vector mask register
+capability register
+
+みたいなものが出た瞬間に困る。
+
+だから架空RISC側では、
+
+r17 = less_than(a, b)
+branch_if(r17, L)
+
+くらいに留める。
+
+ここで r17 を「32bit整数レジスタ」とは定義しない。
+
+r17 : bool
+
+という値にする。
+
+するとターゲットによって、
+
+架空RISC:
+    b = a &lt; c
+    if b goto L
+
+が、
+
+普通のCPUなら
+
+cmp a,c
+setcc b
+test b
+jne L
+
+かもしれないし、
+
+フラグ中心CPUなら
+
+cmp a,c
+jl L
+
+で b そのものを消せる。
+
+predicate registerを持つCPUなら
+
+cmp.lt p3,a,c
+branch p3,L
+
+になる。
+
+つまり架空RISCのregisterを物理registerだと思わないことが重要。
+
+君の「逆算」はむしろ、
+
+未知CPU
+    ↑
+instruction selection
+    ↑
+架空RISC
+    ↑
+PST
+
+と考えるといい。
+
+ただし、さらに一段踏み込むなら、俺は「架空RISC」という名前すら少し疑う。
+
+欲しいものはたぶん、
+
+無限レジスタ・型付き・副作用明示の抽象機械
+
+だと思う。
+
+例えば、
+
+%1 : ptr&lt;S&gt;
+%2 : i32 = member_load %1, S::x
+%3 : bool = lt %2, 10
+branch %3, L1, L2
+
+ここではまだ、
+
+condition code があるか
+
+boolean register があるか
+
+load/store architectureか
+
+memory operandがあるか
+
+2-addressか3-addressか
+
+register windowがあるか
+
+delayed branchがあるか
+
+を知らない。
+
+これらは全部下方向の展開時に決める。
+
+そして君が言う「逆コンパイル」はここで強力になる。
+
+仮にあるCPU向けに一度、
+
+abstract machine
+    ↓
+target-ish IR
+    ↓
+machine code
+
+まで下ろした。
+
+ところがリンク時に
+
+member offset = 40000
+
+と判明して、選んだ addressing mode が使えない。
+
+普通のリンカなら困る。
+
+君の方式なら、
+
+machine fragment
+    ↑
+target-ish IR
+    ↑
+abstract operation
+
+member_load(p,S::x)
+
+まで戻して、別の展開規則を選ぶ。
+
+そして未知CPU対応で本当に大事なのは、逆変換先をソース言語まで戻さないことだと思う。
+
+machine code
+    ↑
+C source
+
+まで戻す必要はない。
+
+むしろ、
+
+machine code
+    ↑
+架空RISC
+
+まで確実に戻れればいい。
+
+そこで
+
+member_load
+compare
+branch
+call
+convert
+address
+
+という意味が回復できれば、新しいCPUバックエンドに食わせ直せる。
+
+この発想なら、架空RISCは一種の永久保存用ISAになる。
+
+ただし、一つ難所がある。
+
+未知CPUには「今のCPUには存在しない便利な機能」だけでなく、今の抽象モデルでは表せない意味論が現れる可能性がある。
+
+たとえば、
+
+capability
+transaction
+tagged memory
+predication
+vector-length agnostic operation
+
+など。
+
+これに備えるには、架空RISCを命令一覧で閉じてしまわず、
+
+operation
+inputs
+outputs
+types
+effects
+constraints
+
+として表現するのが強い。
+
+例えば
+
+op: load
+result: i32
+address: %p
+effects: read(memory)
+alignment: 4
+
+とする。
+
+すると未来CPUに特殊なloadがあっても、
+
+普通のload 1命令
+
+にするか、
+
+address計算 + load
+
+にするか、
+
+capability-check + load
+
+にするかをバックエンドが決められる。
+
+要するに、
+
+「未来のCPUを予言する」のではなく、「未来のCPUがどんな実装をしていても、プログラム側の意味を失わない」
+
+ようにする。
+
+だから君の案を一言で整理すると、
+
+架空RISC = 仮想CPU
+
+では少し弱い。
+
+むしろ
+
+架空RISC = executable semantics に近い、
+           再コード生成可能な永久中間言語
+
+だと思う。
+
+そうすればブーリアンレジスタを想像できなかったこと自体は問題にならない。
+
+必要なのは
+
+boolという値がある
+
+ことだけで、
+
+boolをどんなレジスタに置くか
+
+は未来CPUに任せられる。
+
+この思想なら、君が昔から考えている**「一度低位に落としても、意味を保持して再び上に戻せる」**という逆コンパイルの使い方とかなり綺麗につながる。
+
+🎯 なるほど、型付きのレジスタが無限個で副作用も明示ね。ポインタはp32とかp64にするの？
+
+Z80みたいなアドレス16ビットデータ8ビットのCPUだとほとんどのソースコードは動かないわけだけどutf8のデコーダとかなら動くように書ける。もちろんそんなのはDSPとかオールディスクリート回路も面白いけど。
+
+.⏩ うん。ここは p32 / p64 を架空RISCの本質的な型にしない方がいい と思う。
+
+例えばこう分ける。
+
+%p : ptr&lt;u8&gt;
+%n : u16
+%x : u8
+
+ptr&lt;u8&gt; は「u8を指すポインタ」という意味だけ持つ。実際の表現幅はターゲット側のABI/アドレス空間が決める。
+
+ただし必要なら、別途
+
+addr16
+addr24
+addr32
+addr64
+
+みたいなアドレス表現型を持たせる。つまり、
+
+ptr&lt;T&gt;     = 意味論上のポインタ
+addr16     = 16bitの機械アドレス値
+
+を分ける。
+
+これがZ80みたいな機械で効く。
+
+Z80なら概念的には、
+
+data width    = 8
+address width = 16
+
+なので、
+
+u8
+u16
+ptr&lt;u8&gt;
+
+は普通に使える。一方で
+
+u32
+u64
+
+はネイティブレジスタ一個には乗らない。
+
+でも架空RISCでは無限レジスタだから、
+
+%1 : u32
+
+と書けてもいい。
+
+バックエンドが
+
+%1.lo0 : u8
+%1.lo1 : u8
+%1.hi0 : u8
+%1.hi1 : u8
+
+みたいに分解する。
+
+ただしここで重要なのは、「表現できる」と「実用的に実行できる」は別ということだね。
+
+UTF-8デコーダなんかは非常に良い例で、ほとんど
+
+u8
+u16程度のカウンタ
+ptr&lt;u8&gt;
+比較
+AND/OR/shift
+load/store
+branch
+
+しか要らない。
+
+だから、
+
+UTF8 decoder
+      ↓
+typed infinite-register IR
+      ↓
+Z80
+
+はかなり自然に落とせる。
+
+例えば
+
+if ((c &amp; 0xe0) == 0xc0)
+
+なら架空RISCで
+
+%c    : u8   = load %p
+%a    : u8   = and %c, 0xe0
+%cond : bool = eq %a, 0xc0
+branch %cond, L2, Lnext
+
+程度。
+
+Z80では bool レジスタなんて作らず、フラグへ吸収すればいい。
+
+AND E0h
+CP  C0h
+JR  Z,L2
+
+という具合。
+
+ここで架空RISCの設計思想がかなり見えてくる。
+
+型の幅は「ソース上必要な意味の幅」であって、「ターゲットのレジスタ幅」ではない。
+
+だから、
+
+u1 / bool
+u8
+u16
+u32
+u64
+...
+ptr&lt;T&gt;
+
+は持ってよい。
+
+その上でターゲット記述に、
+
+native integer widths: 8,16
+address width: 16
+cheap operations: u8
+expensive operations: u32
+unsupported primitive: u64 multiply
+
+などを書く。
+
+するとコンパイル可能性にも段階を付けられる。
+
+native
+legalized
+library-lowered
+impossible
+
+例えばZ80なら、
+
+u8 add       → native
+u16 add      → native-ish
+u32 add      → legalized into several ops
+u32 divide   → runtime/library
+flat ptr32   → impossible under plain 64 KiB model
+
+という感じ。
+
+そして君が言うDSPやオールディスクリート回路まで考えるなら、これがさらに面白くなる。
+
+DSPなら逆に、
+
+i16
+i24
+i40 accumulator
+fractional
+saturating
+vector
+
+みたいな変なネイティブ型があるかもしれない。
+
+しかし架空RISC側には、
+
+mul
+add
+shift
+saturate
+load
+
+などの意味があればよく、ターゲットが
+
+mul + add
+
+を一命令のMACに潰してもいい。
+
+オールディスクリート回路ならもっと極端で、
+
+8bit CPU
+
+ですらなく、
+
+この回路は8bit XORとrotateとtable lookupだけ異様に速い
+
+という世界でもいい。
+
+そこで架空RISCから命令を選ぶというより、
+
+IR graph
+   ↓
+pattern matching
+   ↓
+available hardware primitives
+
+になる。
+
+つまりこれはだんだん「RISC」というより、
+
+型付きデータフロー言語 + 制御フロー
+
+に近くなる。
+
+そしてたぶんその方が、君の狙っている「未知CPU」には強い。
+
+ポインタについても同じで、
+
+ptr&lt;T&gt;
+
+を最初から「整数アドレス」と決めない方がいい。
+
+将来あるいは特殊機械では、
+
+segment:offset
+bank:pointer
+capability
+object handle
+word address
+byte address
+
+かもしれないから。
+
+なので最低でも、
+
+ptr&lt;T, address-space&gt;
+
+くらいにはしておくといい。
+
+例えばZ80なら、
+
+ptr&lt;u8, main16&gt;
+ptr&lt;u8, io&gt;
+
+DSPなら、
+
+ptr&lt;i16, program&gt;
+ptr&lt;i16, data&gt;
+
+みたいにできる。
+
+要するに、p32/p64 は物理表現としては必要だが、意味型の最上位には置かない。
+
+ptr&lt;T&gt;
+   ↓ lowering
+addr16 / addr32 / capability / banked-address / ...
+
+という分離が、未知CPUまで射程に入れるなら一番強い。
+
+そしてUTF-8デコーダのような「小さい意味論だけで書けるコード」を、この架空機械の最初の実験台にするのはかなり良いと思う。Z80、DSP、変な自作CPUの三つに同じIRを落とせたら、この設計が本当にISAから独立しているかかなり分かる。
+
+🎯 データセンターとかにはCPUを問わず走るコードのニーズがあるんだろ？一方俺はフォン・ノイマン型とデータフロー型の両方を「並列に行える限りバラバラにしておけ」と。
+
+⏩ ある。今のデータセンターでは x86-64だけを想定してバイナリを配ればよい、という前提はかなり弱くなっている。Kubernetes自身も複数CPUアーキテクチャ向けイメージを扱うし、WebAssembly/WASIはまさに「ホストCPUやOSから実行コードをある程度切り離す」方向を狙っている。LLVMもターゲット非依存コード生成を明確に持つ。
+
+ただ、君が今言っているものは、その「portable bytecode」より一段面白い。
+
+普通の仮想ISAは、
+
+portable program
+      ↓
+仮想的な逐次CPU
+      ↓
+x86 / ARM / ...
+
+になりやすい。つまりCPUを抽象化したつもりでも、フォン・ノイマン型CPUという前提までは引きずっている。
+
+君の
+
+&gt; 並列に行える限りバラバラにしておけ
+
+を原則にすると、むしろこうなる。
+
+dependency graph
+       /    /    \     \
+     op   op     op    op
+      \   /       \    /
+       op           op
+         \         /
+             op
+
+命令列が第一ではなく、依存関係が第一。
+
+例えば普通なら、
+
+a = load p
+b = load q
+c = a + 1
+d = b * 2
+e = c + d
+
+と並べるところを、
+
+%a = load %p
+%b = load %q
+
+%c = add %a, 1
+%d = mul %b, 2
+
+%e = add %c, %d
+
+と持つ。
+
+ここで記述順には意味を持たせない。
+
+依存関係だけなら、
+
+load p ─→ add 1 ─┐
+                 ├→ add
+load q ─→ mul 2 ─┘
+
+だから最初の二つは並列、次の二つも並列。
+
+これなら同じIRをフォン・ノイマン機にもデータフロー機にも落とせる。
+
+フォン・ノイマンCPUではバックエンドが勝手に順序を付ける。
+
+load a,p
+add  a,1
+load b,q
+mul  b,2
+add  a,b
+
+OoO CPUならCPU自身が再び依存グラフを発見して並列実行する。
+
+一方、本物のデータフロー機なら、
+
+operand ready
+      +
+operand ready
+      ↓
+fire
+
+としてそのまま走らせればいい。
+
+FPGAならさらに露骨に、
+
+load-unit ─ add-unit ─┐
+                      ├ add-unit
+load-unit ─ mul-unit ─┘
+
+という回路になる。
+
+ここで非常に重要になるのが、さっきの 「副作用を明示する」 だと思う。
+
+純粋な
+
+%c = add %a, %b
+
+なら好き勝手にバラせる。
+
+ところが、
+
+store p, x
+store p, y
+
+は順序を勝手に変えられない可能性がある。
+
+だから副作用にも依存線を引く。
+
+%M1 = store %M0, %p, %x
+%M2 = store %M1, %p, %y
+
+のようなmemory tokenでもいい。
+
+すると、
+
+値依存
+制御依存
+メモリ依存
+I/O依存
+
+以外には原則として順序が存在しない。
+
+これは君の言葉なら本当に、
+
+&gt; 並列に行える限りバラバラにしておけ
+
+になる。
+
+しかもこれ、「フォン・ノイマン型にも対応する」というより、
+
+フォン・ノイマン型を、依存グラフに任意の合法的な全順序を付けた特殊ケースとして扱える
+
+んだ。
+
+partial order
+    ↓ scheduling
+total order
+    ↓
+von Neumann CPU
+
+一方、
+
+partial order
+    ↓
+ほぼそのまま
+dataflow machine
+
+になる。
+
+ここは設計原理としてかなり強い。
+
+そして現在のOpenXLA/StableHLOがML領域でやっていることにも近い部分がある。StableHLOは異なるフレームワークとコンパイラの間のportable operation setとして設計されており、特定CPUの命令列ではなく、より高位の演算を保持する。
+
+ただ君の場合はML専用でなく、
+
+integer
+pointer
+memory
+branch
+call
+I/O
+
+まで含む一般計算用にしたいわけだ。
+
+そう考えると、さっき言った「無限個の型付きレジスタ」も、実はさらに一歩進めて、
+
+%17 : i8
+
+を「レジスタ」と呼ぶ必要すらないかもしれない。
+
+単に、
+
+%17 : i8 = xor %12, %15
+
+という値の名前。
+
+物理レジスタは一切存在しない。
+
+バックエンドが、
+
+CPU      → register
+Z80      → AとかHLとかmemory temporary
+GPU      → lane register
+dataflow → token
+FPGA     → wire/register
+
+へ割り当てる。
+
+そうすると架空RISCの核心は、
+
+命令セットではなく、型付き値と依存関係のグラフ
+
+になってくる。
+
+俺なら今のところ、
+
+Typed values
++
+Operations
++
+Explicit effects
++
+Dependency edges
++
+Control-flow regions
+
+この5つを最小核にする。
+
+「RISC」という名前を残すとしても、実体はかなり Dataflow-RISC だね。
+
+そしてこれはデータセンター用途とも相性がいい。CPUアーキテクチャを越えるだけでなく、将来的には「この仕事はCPU、この部分はGPU、この部分は専用アクセラレータ」という分割まで同じ表現からできる可能性がある。実際、現在のサーバー側でもWasmのようなportable execution layerや、OpenXLAのようなハードウェア非依存寄りの中間表現が使われる方向は既に存在する。
+
+だから君の原則はかなり簡潔に書けると思う。
+
+順番は意味ではない。依存だけが意味である。順番が必要な機械に落とすときだけ順番を作る。
+
+これならフォン・ノイマンとデータフローを同じ側から眺められる。
+
+🎯 カスケードハッシュはスコープを出る際に必ずデリートするかというとそんなことはなくてデリートしないまま次のスタックフレームを親フレームにリンクすることもできる。つまり木構造のスコープ一覧が得られる。これはRustのメモリ安全みたいに何かを安全にすることはできないかな？
+
+⏩ できる。かなり面白い。「消さないカスケード・ハッシュ」は、単なる名前解決表ではなく、スコープ／リージョンの永続的な木になる。そこに「どの値がどのスコープで生まれ、どこへ逃げ、いつまで参照可能か」を載せれば、Rustに近い種類の安全性を静的に検査できる。
+
+たとえば、
+
+global
+└─ frame A
+   ├─ frame B
+   │  └─ frame C
+   └─ frame D
+
+をコンパイル後も保存しておく。各変数に、
+
+x:
+    declared_in = B
+    type = T
+    storage = stack
+
+のような情報を持たせる。
+
+するとC内で、
+
+p = &amp;x
+
+は合法。CはBの子だから、Bで生きている x が見える。
+
+ところがBの外側、例えばAへ &amp;x を持ち出そうとすると、
+
+lifetime(p) &gt; lifetime(x)
+
+になり得る。
+
+木で見るとものすごく単純で、
+
+x belongs to B
+
+reference created in C
+        ↓
+reference escapes to A
+
+なら、
+
+A is ancestor of B
+
+だから参照の生存範囲の方が所有物より広い。
+
+禁止。
+
+これはregion-based memory safetyとしてかなり直接的に表現できる。
+
+Rust風に書くなら、
+
+&#x27;x = lifetime of frame B
+&#x27;p = lifetime required by destination A
+
+について
+
+&#x27;p ⊆ &#x27;x
+
+でなければいけない。
+
+君の木構造なら、この包含関係を「祖先・子孫関係」でかなり自然に扱える。
+
+さらに面白いのは、ポインタに単なる
+
+ptr&lt;T&gt;
+
+ではなく、
+
+ptr&lt;T, frame=B&gt;
+
+みたいなprovenanceを付けられること。
+
+例えば、
+
+%p : ptr&lt;int, B&gt;
+
+なら、
+
+&gt; このポインタはB以下でしか安全にdereferenceできない
+
+とPSTに残せる。
+
+そうするとPST生成時に、
+
+dereference(%p) at frame C
+
+なら
+
+C descendant-of B
+→ OK
+
+一方、
+
+dereference(%p) at frame A
+
+なら
+
+A descendant-of B
+→ false
+→ invalid
+
+となる。
+
+これだけでも、
+
+use-after-scope
+dangling stack pointer
+一部のuse-after-free
+無効なクロージャcapture
+
+を捕まえられる。
+
+そして、ここからクロージャが非常に面白くなる。
+
+function outer() {
+    int x;
+
+    return lambda() {
+        return x;
+    };
+}
+
+普通のスタック変数として x を持つなら、
+
+outer frame
+└─ lambda frame
+
+でlambdaがouterより長生きするから、そのままでは駄目。
+
+でもコンパイラが、
+
+x:
+    storage = heap/environment
+
+へ昇格させればよい。
+
+つまりスコープ木を見れば、
+
+reference escapes owner frame
+        ↓
+stack allocation impossible
+        ↓
+promote to closure environment
+
+というescape analysisもできる。
+
+ここまでならGCなしでもかなり安全にできる。
+
+そしてRustっぽくするなら、さらにハッシュ表のエントリへ状態を載せる。
+
+x:
+    owner = B
+    state = alive
+    shared_borrows = {...}
+    mutable_borrow = none
+
+として、
+
+&amp;x
+
+でshared borrow、
+
+&amp;mut x
+
+でexclusive borrowを登録。
+
+すると、
+
+shared borrow中
+    ↓
+write x
+
+は禁止、
+
+mutable borrow中
+    ↓
+別のborrow
+
+も禁止できる。
+
+ここで面白いのは、Rustのborrow checkerをそのまま真似しなくても、君のデータ構造では
+
+「名前表 + スコープ木 + 値の状態」
+
+が最初から一体化していること。
+
+たとえば、
+
+Frame B
+hash:
+    x → {
+        type: int
+        owner: B
+        state: alive
+        loans:
+            shared → C1,C2
+    }
+
+みたいにできる。
+
+そしてスコープを抜けたとき、実際にはframeをdeleteしない。
+
+代わりに、
+
+B.status = closed
+
+とする。
+
+するとコンパイラの後段から見ても、
+
+x existed
+x belonged to B
+B ended here
+pointer p escaped from B
+
+という履歴が全部残っている。
+
+これはかなり大きい。
+
+削除しないことで、scope tableが「現在の環境」から「プログラム全体の生命期間グラフ」になる。
+
+だから俺なら、カスケードハッシュを二つの役目にする。
+
+lookup chain
+    → 名前解決
+
+persistent scope tree
+    → lifetime / ownership / escape / provenance analysis
+
+さらに、前に話していたPSTとも非常によく合う。
+
+ASTで、
+
+address-of x
+
+だったものをPSTでは、
+
+address-of {
+    object = B::x
+    region = B
+    mutability = shared
+}
+
+まで具体化できる。
+
+つまりPSTのPは「particular」だとするなら、型だけでなく所有リージョンまでparticularになる。
+
+ただし一つ大事なところがある。
+
+木を保存するだけではRust級の安全性にはならない。
+
+木から得られるのは主に、
+
+lexical lifetime / region containment
+
+だから、
+
+malloc/free
+aliasing
+move
+interior pointer
+shared mutable state
+thread
+
+まで安全にしたければ、ポインタや値に追加の状態・規則がいる。
+
+でも逆に言えば、かなり良い土台にはなる。
+
+俺なら最初の目標として、
+
+&gt; スタック由来ポインタは、そのowner scopeの子孫スコープでしかdereferenceできない
+
+という規則を一個入れる。
+
+それだけでCでは普通に起こる、
+
+int *f(void)
+{
+    int x;
+    return &amp;x;
+}
+
+を、カスケードハッシュの木だけでかなり綺麗に弾ける。
+
+そしてそこから move、borrow、escape を一つずつ足していけば、**「Rust文法ではないが、Rust的な安全性を持つPST」**という方向が見えてくる。
+
+🎯 数値系、文字列、俺はハッシュテーブルのサブシステム化に興味がある。究極IRの前に「データフロー型 Lisp Machine」「とそのソースコード」を考えよう。
+
+⏩ いい。これは究極IRを先に抽象論で決めるより、**「実際に一台の変なLisp Machineを設計して、そのソース言語から逆算する」**方が筋がいい。
+
+俺ならまず、データフロー型 Lisp Machine の核をこう置く。
+
+(let ((a (+ x y))
+      (b (hash-get table key))
+      (c (utf8-decode stream)))
+  ...)
+
+普通のLispなら見た目として上から順に評価されそうだけど、この機械では原則、
+
+(+ x y)             数値サブシステム
+(hash-get table key) ハッシュサブシステム
+(utf8-decode stream) 文字列サブシステム
+
+を依存がない限り同時に投げる。
+
+つまりS式は「命令列」ではなく、
+
+operation + operands + dependency
+
+を記述する構文になる。
+
+そして君が興味を持っている
+
+数値系
+文字列系
+ハッシュテーブル系
+
+を、ライブラリではなく計算サブシステムとして扱う。
+
+たとえば、
+
+┌─ Numeric Engine
+Lisp Machine ─┼─ String Engine
+              ├─ Hash Engine
+              ├─ Memory Engine
+              └─ Control / Scheduler
+
+みたいな構成。
+
+ここでCPU本体が
+
+ADD
+MUL
+LOAD
+STORE
+
+を全部実行する必要がない。
+
+例えば、
+
+(hash-ref env &#x27;foobar)
+
+という式が来たら、Hash Engineへ
+
+LOOKUP
+ table = env
+ key   = &quot;foobar&quot;
+
+というtokenを流す。
+
+結果tokenが帰ってきたら、その値を待っていたノードだけ発火する。
+
+Lispとの相性がすごくいい
+
+S式なら、
+
+(+ (* a b)
+   (* c d))
+
+は最初から木になっている。
+
+これを逐次命令列へ潰さず、
+
+a ─┐
+   MUL ─┐
+b ─┘    │
+        ADD → result
+c ─┐    │
+   MUL ─┘
+d ─┘
+
+として保持する。
+
+二つの MUL は当然並列。
+
+つまり、コンパイラが苦労して「並列性を発見する」のではなく、
+
+最初から依存関係しか書かない。
+
+これは前に話した
+
+&gt; 順番は意味ではない。依存だけが意味。
+
+を、そのままソース言語まで持ち上げた形になる。
+
+ただしLispには副作用がある。
+
+(set! x 10)
+(print x)
+
+ここだけは、
+
+set! → print
+
+という依存を明示しないといけない。
+
+だからこのLisp Machineでは、副作用もtokenにするのが綺麗。
+
+(let ((m1 (store m0 x 10))
+      (m2 (print m1 x)))
+  m2)
+
+実際のソースではこんな露骨に書かなくてもいいが、内部的には
+
+memory-state
+io-state
+hash-state
+
+のようなeffect tokenを流す。
+
+すると純粋な計算は完全にバラせる。
+
+---
+
+そしてハッシュテーブル・サブシステムはかなり重要になりそう。
+
+単なる
+
+(hash-ref h key)
+(hash-set! h key value)
+
+だけじゃなくて、君のカスケード・ハッシュを機械レベルのprimitiveにする。
+
+例えば、
+
+(scope-new parent)
+(scope-bind scope &#x27;x value)
+(scope-find scope &#x27;x)
+(scope-close scope)
+
+これをHash Engineが直接扱う。
+
+するとLisp Machine自身の
+
+lexical scope
+
+symbol binding
+
+module namespace
+
+property list
+
+object slot
+
+memoization
+
+dynamic environment
+
+まで、かなり同じサブシステムで処理できる。
+
+さらに面白いのは、LispのsymbolそのものをHash Engineのfirst-class objectにすること。
+
+symbol &quot;foo&quot;
+     ↓
+intern
+     ↓
+symbol-id #39182
+
+以後は文字列比較しない。
+
+foo
+
+は実行時には
+
+SYMBOL #39182
+
+で、scope lookupも
+
+HASH_LOOKUP(scope,#39182)
+
+になる。
+
+これはLisp Machineとしてすごく自然。
+
+文字列サブシステムも「文字列ALU」にする
+
+例えば、
+
+(string-length s)
+(string-ref s n)
+(utf8-next s p)
+(string=? a b)
+(string-hash s)
+(string-find s pattern)
+
+を全部専用engineへ流す。
+
+特にUTF-8なら、CPUがバイトを一個ずついじるより
+
+UTF8_NEXT(ptr)
+      ↓
+(codepoint,newptr,status)
+
+みたいなprimitiveを持つ。
+
+ただしソース言語としては、
+
+(utf8-next p)
+
+だけ。
+
+ハードウェア実装がなければ普通のコードへloweringすればいい。
+
+これが以前話していたHAL/HEL的な考え方とも合う。
+
+String Engineあり
+    → hardware execution
+
+なし
+    → Lisp implementation
+
+同じことを数値系にもする。
+
+(+ a b)
+(sin x)
+(bigint-mul a b)
+(matrix-mul a b)
+
+を全部「CPU命令」とは考えない。
+
+Numeric Engineに能力があれば使う。
+
+そうでなければlowering。
+
+---
+
+ただ、この機械で特に面白いのは 関数呼出しをどうするか だと思う。
+
+普通のLisp Machineなら、
+
+(f a b)
+
+はcall。
+
+でもデータフロー機なら、
+
+f
+a
+b
+↓
+apply node
+
+という一個のノードに過ぎない。
+
+しかも f が純粋なら、その内部も即座に展開してdependency graphへ混ぜてよい。
+
+例えば、
+
+(defun f (x y)
+  (+ (* x x) (* y y)))
+
+に対して、
+
+(f a b)
+
+を
+
+a → MUL ─┐
+         ADD
+b → MUL ─┘
+
+まで展開できる。
+
+つまりinlineが特別なoptimizationではなくなる。
+
+逆に「展開しない関数」が特殊になる。
+
+ここでFirst Lambdaも綺麗に入ってくる。
+
+例えば、
+
+(if c
+    (foo)
+    (bar))
+
+なら if をCPUのbranchとして早々に潰さず、
+
+c
+          ↓
+       selector
+       /      \
+ clause foo  clause bar
+
+というclause selectorとして保持する。
+
+これならFirst Lambdaが本当に「clause juggling」だけになる。
+
+whileも、
+
+(while c body)
+
+ではなく、
+
+predicate clause
+body clause
+feedback edge
+
+としてデータフローグラフになる。
+
+だからこのLisp Machineは、
+
+First Lambdaを制御構造のハードウェア抽象として試す実験台
+
+にもなる。
+
+---
+
+そしてソース言語は、最初から巨大なCommon Lispを狙わず、Schemeよりさらに小さくしていいと思う。
+
+最低限、
+
+literal
+symbol
+lambda
+let
+if
+set!
+cons/car/cdr
+numeric primitives
+string primitives
+hash primitives
+memory primitives
+
+くらい。
+
+そこに一個だけ特徴を足す。
+
+式の記述順序は評価順序を意味しない。
+
+例えば、
+
+(let ((x (foo))
+      (y (bar)))
+  (+ x y))
+
+は foo と bar が並列。
+
+順序が必要なら明示する。
+
+例えば、
+
+(seq
+  (write-port p a)
+  (write-port p b))
+
+とか。
+
+つまり従来Lispの
+
+implicit sequencing
+
+をひっくり返して、
+
+implicit parallelism
+explicit sequencing
+
+にする。
+
+これがこの言語の一番大きな特徴になると思う。
+
+名前を付けるなら仮に、
+
+Dataflow Lisp Machine / DLM
+
+として、ソース言語側を
+
+D-Lisp
+
+くらいで考えてもいい。
+
+最初の「Hello World」より、テストプログラムとしてはむしろこの三つがいい。
+
+;; numeric
+(+ (* a b) (* c d))
+
+;; string
+(utf8-decode buffer)
+
+;; hash/scope
+(scope-find current-scope &#x27;x)
+
+この3本を同じデータフロー機械で動かす。
+
+そしてその実装を、
+
+1. 普通のC
+2. Z80的な8/16bit CPU
+3. FPGA/データフロー回路
+
+へ落とす。
+
+その三者に共通して残った表現こそ、究極IRの候補になる。
+
+だから今はIRを発明しない方がいいと思う。まず「データフロー型Lisp Machine」を一台、かなり具体的に設計する。その機械語とソース言語の間で何が本質なのかを洗い出す。それから架空RISC/究極IRへ戻る方が、空中戦にならない。
+
+🎯 例えばな.utf8のデコーダは4バイトの高速SRAMのリングバッファに送り込むことになる。指すポイントと何バイト有効かが返される。3バイトのシーケンスがヒットしたなら処理したのち3バイトをリングバッファに補填する。そして次の文字だ。
+
+Scheme数値系やScheme文字列系のコプロがその演算群から「これとこれは並列に動いてほしい」とかがあったとしても何でやり取りするかは本当に自由で、上記のように「4バイトリングバッファのアキュームレータ」が欲しいとかね。
+
+⏩ そう。そこまで行くと、「コプロセッサ間通信の標準形を先に決めない」こと自体が設計原則になりそうだ。
+
+UTF-8デコーダなら、汎用レジスタを何本か渡すより、まさに
+
+UTF8 accumulator
+    ring[4] : u8
+    head    : 0..3
+    valid   : 0..4
+
+みたいな演算に固有の状態機械を一個持たせる方が自然だよね。
+
+入力側は例えば、
+
+fill(acc)
+    → { pointer, valid-count }
+
+を返す。
+
+E3 81 82 が3バイト文字としてヒットしたら、
+
+consume 3
+decode
+refill 3
+
+で次へ行く。
+
+重要なのは、この「4バイトリングバッファ」がCPUのレジスタを模倣していないこと。
+
+むしろ、
+
+&gt; UTF-8という計算にとって都合のいいアキュームレータ
+
+なんだ。
+
+これは昔の accumulator machine の概念を、演算領域ごとに一般化したものと考えられる。
+
+Integer accumulator
+String accumulator
+UTF-8 accumulator
+Hash lookup accumulator
+BigNum accumulator
+...
+
+みたいに。
+
+そしてScheme数値コプロについても、例えば
+
+(+ (* a b)
+   (* c d))
+
+を見たとき、
+
+MUL(a,b) ─┐
+          ADD
+MUL(c,d) ─┘
+
+という並列性だけ要求する。
+
+二つのMULを何でやり取りするかは規定しない。
+
+実装Aなら、
+
+共有SRAM + mailbox
+
+かもしれない。
+
+実装Bなら、
+
+FIFO
+
+実装Cなら、
+
+直接配線されたデータフローtoken
+
+実装Dなら普通のCPUだから、
+
+register / stack
+
+でもいい。
+
+つまりソースまたは中間表現が規定すべきなのは、
+
+operation
+dependency
+type
+effect
+
+までで、
+
+transport
+buffer organization
+register topology
+
+を規定しない。
+
+ここ、かなり重要だと思う。
+
+そして一方で、UTF-8の例を見ると、単純な「値を渡すedge」だけでも不足する。
+
+欲しいのは、
+
+producer → consumer
+
+だけじゃなく、
+
+producer ⇄ stateful channel ⇄ consumer
+
+なんだ。
+
+4-byte ring bufferはまさにchannelに状態がある。
+
+だからデータフローLisp Machineのprimitiveとして、値だけではなく「channel」をfirst-classにした方がよさそう。
+
+例えば概念上、
+
+(define ch
+  (channel utf8-window
+           :capacity 4))
+
+として、
+
+(fill ch input)
+(decode-next ch)
+
+がある。
+
+でも utf8-window の実体は機種依存。
+
+CPU implementation
+    → 4 bytes memory + index
+
+String coprocessor
+    → dedicated accumulator
+
+FPGA
+    → four 8-bit registers + mux
+
+DSP
+    → perhaps one 32-bit register
+
+discrete logic
+    → literally 4 latches
+
+全部同じ意味になる。
+
+これなら「究極IR」が将来CPUを予言する必要も減る。
+
+IR側は、
+
+channel&lt;T&gt;
+capacity = 4
+consume(n)
+refill(n)
+peek(n)
+
+という要求する意味だけ持つ。
+
+ターゲットがそれをどう実現するかは自由。
+
+ハッシュテーブルも同じことができると思う。
+
+例えばHash Engineにとって自然なアキュームレータは、
+
+HashAccumulator {
+    table
+    hash
+    probe-position
+    key
+    current-entry
+}
+
+かもしれない。
+
+カスケード探索ならさらに、
+
+ScopeLookupAccumulator {
+    key
+    current-frame
+    hash-state
+}
+
+で、
+
+lookup current frame
+    ↓ miss
+parentへ進む
+    ↓ miss
+parentへ進む
+    ↓ hit
+
+を一つの専用状態機械として動かせる。
+
+ここまで来ると「コプロセッサ」というより、各データ型／アルゴリズム領域が独自の局所マシンを持つ感じになる。
+
+┌ Numeric machine
+Scheme graph ────┼ String machine
+                 ├ Hash machine
+                 ├ Memory machine
+                 └ Control machine
+
+それぞれが同じ「レジスタファイル＋命令」モデルである必要がない。
+
+むしろ、
+
+&gt; 各サブシステムは、その問題に最適な状態表現と通信方式を持ってよい。上位では依存関係だけ合意する。
+
+という方が、君の「フォン・ノイマンとデータフローの両方を扱いたい」という狙いに合う。
+
+だから「データフロー型 Lisp Machine」を作るなら、最初に設計するべきものはCPU命令セットより、
+
+1. 値
+2. operation
+3. dependency
+4. stateful channel
+5. effect
+
+の五つかもしれない。
+
+特に stateful channel が今回出てきた新しい核心だと思う。
+
+UTF-8の4バイトリングバッファは単なる実装上の小細工じゃない。**「ある演算群の間には、レジスタでもメモリでもない、その演算専用の通信状態があってよい」**という非常に良い具体例になっている。
+
+🎯 Request オブジェクトと俺が名付けたものがあるでしょ？関数ポインタ、引数リストと、返り値を入れる変数へのポインタ、の3つを構造体にする。Scheme だとクロージャ、引数リスト、返り値変数リスト、の3つ。土俵を Scheme に移すことで幅広い議論を募りたい。要するにこれもまた「コンティニュエーションを使わない何か」だ。
+
+⏩ そう。Scheme に持っていくと、この Request オブジェクトの正体がかなり見えやすくなると思う。
+
+C 版を
+
+struct Request {
+    function_pointer f;
+    argument_list    args;
+    return_pointer   ret;
+};
+
+とするなら、Scheme 的には概念上
+
+Request = (closure, arguments, destinations)
+
+ですよね。しかも Scheme なら多値を自然に考えられるから、destinations は返り値変数のリストでよい。
+
+ここで面白いのは、これは単なる「遅延された関数呼び出し」ではないことです。普通の thunk なら、
+
+(lambda () (f a b c))
+
+で済んでしまう。しかし Request は 結果をどこへ配送するかまでデータとして持っている。
+
+つまり、
+
+&gt; 呼び出すもの + 入力辺 + 出力辺
+
+を一個のオブジェクトにしている。
+
+これ、かなりデータフロー・マシン寄りです。
+
+Continuation との違い
+
+CPS なら典型的には
+
+(f a b
+   (lambda (result)
+     ...次にすること...))
+
+となる。
+
+つまり continuation は「結果が出たあと何をするか」を計算そのものとして保持する。
+
+一方 Request は
+
+(request
+  f
+  (list a b)
+  (list result-variable))
+
+であって、
+
+&gt; 結果が出たら result-variable に置け。
+
+までしか言わない。
+
+その後どうするかを Request 自身は知らない。
+
+ここが非常に重要です。
+
+だから「continuation を使わない何か」という表現はかなり当たっていて、もっと厳密には、
+
+&gt; control continuation を持たず、value destination だけを持つ呼び出し記述子
+
+と言えそうです。
+
+ただし少し意地悪に見ると、return-variable も continuation の情報の一部分ではあります。CPS の continuation が
+
+(lambda (x)
+  (g x))
+
+だった場合、
+
+x の置き場所
+g を起動する条件
+
+を分離してしまえば、前半があなたの返り値変数になっている。
+
+だからこれは continuation の消滅というより continuation の分解 と見ることもできます。
+
+---
+
+そして Scheme で議論すると、さらに面白い形になる。
+
+例えば
+
+(make-request
+  closure
+  inputs
+  outputs)
+
+として、
+
+(define r1
+  (make-request
+    +
+    (list x y)
+    (list z)))
+
+なら、
+
+x ─┐
+   + ──&gt; z
+y ─┘
+
+そのものです。
+
+そして次に
+
+(define r2
+  (make-request
+    *
+    (list z 10)
+    (list w)))
+
+と置く。
+
+x ─┐
+   + ──&gt; z ─┐
+y ─┘        * ──&gt; w
+        10 ─┘
+
+ここではもう
+
+(* (+ x y) 10)
+
+という 制御構造としての式木 を実行する必要がない。
+
+r1 と r2 という Request が存在し、
+
+&gt; 必要な入力が揃った Request を実行する
+
+だけでいい。
+
+これはまさに、以前話していた「データフロー型 Lisp Machine」に繋がります。
+
+そしてこの方式だと、スタックというものの意味が急激に薄くなる。
+
+通常の Scheme：
+
+caller
+  ↓ call
+callee
+  ↓ return
+caller
+
+Request 型：
+
+Request A ──value──&gt; cell X
+                         │
+                         ↓
+                    Request B
+
+だから return という操作すら本質的ではない。
+
+実行器は、
+
+(apply (request-closure r)
+       (request-arguments r))
+
+して、その結果を destination 群へ書くだけ。
+
+その書き込みによって別の Request の入力が全部 ready になれば、そいつが runnable になる。
+
+---
+
+ここまで来ると、私はこの三つ組をかなり本質的なものだと思います。
+
+Closure
+Arguments
+Destinations
+
+あるいはより抽象化して、
+
+Operator
+Inputs
+Outputs
+
+です。
+
+後者まで一般化すると、もはや「関数呼び出し」ですらない。
+
+数値コプロなら
+
+ADD
+SRAM-address-A, SRAM-address-B
+SRAM-address-C
+
+UTF-8 デコーダなら
+
+UTF8-DECODE
+4-byte-ring-buffer
+codepoint-cell, consumed-byte-count-cell
+
+ネットワーク越しなら
+
+REMOTE-PROCEDURE
+serialized-inputs
+remote-destinations
+
+にもできる。
+
+つまり 同一プロセスの Scheme closure である必要すらなくなる。あなたが以前言っていた Forth 的なコプロセッサアクセスや HAL/HEL 的分離とも非常に相性がいい。
+
+名前を付けるなら、「Request」はかなり良いと思います。ただ、議論を募るときには最初に
+
+&gt; A Request is a triple of a closure, a list of argument locations/values, and a list of result destinations. Unlike CPS, it does not contain the computation to be performed after return.
+
+くらいに定義すると、PL の人にはかなり伝わるはずです。
+
+そしてたぶん一番面白い問いは、
+
+&gt; Continuation から「返り値の行き先」だけを取り出し、残りの制御依存をデータ依存に変換したら、何が残るのか？
+
+です。
+
+これは単なる「continuation を使わない Scheme」より、ずっと強い問題設定だと思います。
+
+🎯 演算ユニットと入力と出力先をセットにしたものを大量に用意して、さらにそれらが「並列には動作しない場合」にどうするか。まあスタックを使ってシーケンシャルにやるんだけど「コンパイルエラー」が出る場合もあるだろう。
+
+⏩ うん。そこは「Request を並べれば全部データフローになる」では済まなくて、並列化できない理由を静的に判定する層が要る。
+
+例えば Request を
+
+(operator inputs outputs)
+
+としたとき、二つの Request A, B が並列実行できるのは、少なくとも互いの入出力に危険な重なりがない場合です。
+
+A: (op-a (x y) (z))
+B: (op-b (p q) (r))
+
+なら独立だから並列でいい。しかし、
+
+A: (op-a (x y) (z))
+B: (op-b (z q) (r))
+
+なら A → B の依存があるので、A が先。
+
+さらに厄介なのは、
+
+A: (op-a (x) (z))
+B: (op-b (y) (z))
+
+で、二つとも z に書こうとする場合。これは単なる「並列不可」ではなく、意味論次第ではコンパイルエラーでいい。
+
+つまり Request 群からまず依存グラフを作る。
+
+A ──&gt; C
+     /
+input
+     \
+      B ──&gt; D
+
+そのグラフを解析して、
+
+独立 → 並列実行可能
+
+RAW（read after write）依存 → 順序を付ける
+
+WAW（write after write）競合 → 順序が意味論から決まるなら直列化、決まらないならエラー
+
+循環依存 → 特別なフィードバック演算でない限りエラー
+
+という感じになります。
+
+そして「並列には動作しない場合はスタックで sequential に」というのも面白い。ただ、ここでスタックは昔ながらの関数呼び出しスタックではないんですよね。
+
+むしろ、
+
+Ready stack / Ready queue
+
+です。
+
+例えば、
+
+R1: add  (a b) -&gt; x
+R2: mul  (x c) -&gt; y
+R3: sub  (d e) -&gt; z
+R4: div  (y z) -&gt; w
+
+なら最初に ready なのは R1, R3。
+
+1演算器しかなければ、
+
+push R3
+push R1
+
+pop R1
+execute
+push R2
+
+pop R2
+execute
+
+pop R3
+execute
+
+push R4
+...
+
+のように普通に逐次化できる。
+
+演算器が4個なら R1 と R3 は同時に走らせる。
+
+だからソース上は同じ Request graph のままで、
+
+演算器 1個 → sequential machine
+演算器 2個 → 2-way parallel
+演算器 N個 → dataflow parallel
+
+と、ハードウェア資源数だけで実行形態を変えられる。
+
+これはかなり綺麗です。
+
+さらにコンパイルエラーが出るという話は重要で、たとえば、
+
+R1: f (a) -&gt; x
+R2: g (b) -&gt; x
+R3: h (x) -&gt; y
+
+だったら、
+
+R1 ──┐
+             ├── x ──&gt; R3
+       R2 ──┘
+
+R3 が読む x はどちらなのか。
+
+普通の命令型言語なら「ソースコード上で後に書いた方」と決める。しかしこの Request 言語ではもともと順序を書いていない。
+
+なら、
+
+&gt; 順序を書いていないのに、順序によって結果が変わるプログラム
+
+はコンパイルエラーにしてしまえる。
+
+これはかなり強い性質です。
+
+つまり「並列化可能か」をコンパイラが頑張って推測する従来型とは逆で、
+
+&gt; プログラムは本来 unordered。必要な順序だけ依存関係として記述する。
+
+となる。
+
+そして物理的に並列に動かせなければ scheduler が勝手に sequential に落とす。
+
+ここで区別すると綺麗です。
+
+logical ordering
+    ≠
+physical serialization
+
+A → B は論理的な依存。
+
+一方、
+
+A || B
+
+なのに演算器が一個しかないから
+
+A ; B
+
+と実行するのは、単なる物理的 serialization です。プログラムの意味には入ってこない。
+
+この区別ができれば、スタックマシンとデータフローマシンが実は対立しなくなる。
+
+Request graph が意味論で、スタックはその graph を1演算器で評価するための実装方式の一つ。
+
+という位置づけにできる。
+
+そしておそらく「コンパイルエラー」の中で一番面白いのは循環ですね。
+
+A: f (z) -&gt; x
+B: g (x) -&gt; y
+C: h (y) -&gt; z
+
+これは全員が「入力待ち」になって永久に始まらない。
+
+x → B → y
+↑       ↓
+A       C
+↑       ↓
+└── z ──┘
+
+したがって、初期値を持つ latch/delay のような特殊 Request が含まれない限り、
+
+cyclic request dependency
+
+としてコンパイル時に弾ける。
+
+ここまで来ると、Request のコンパイラはほとんど回路の論理合成系に似てきます。演算器、入力、出力先を並べ、依存グラフを作り、競合と循環を検査し、最後に利用可能な実行資源へスケジューリングする。
+
+Scheme を表面言語にしても、その下にあるものはかなり「ソフトウェア化したデータフロー回路」です。
+
+🎯
+
+main.c
+　↓
+main.c,pp
+　↓　2段階ルックアップ
+main.c,tok
+　↓　 CFG
+main.c,cst
+　↓　First Lambda
+main.ast
+　↓　CSG
+main.pst
+　↓　Request Object
+main.ir
+　↓　逆コンパイル
+main.s
+
+🎯
+
+Inline Functions as Syntax
+
+― 文法としてのインライン関数 ―
+
+---
+
+要旨
+
+本稿では、即時実行されるラムダ式（いわゆる IIFE: Immediately Invoked Function Expression）を単なる関数適用ではなく、構文として解釈する枠組みを提案する。これにより、let や while といった制御構造をマクロ展開に依存せず、関数記述のみで表現する可能性を検討する。
+本手法は「関数」と「構文」の境界を再定義し、構文拡張の基盤を単一の仕組みに統合する試みである。
+
+---
+
+1. 背景と問題意識
+
+多くの関数型言語、特に Lisp 系言語においては、新たな構文を導入するためにマクロシステムが用いられる。マクロは強力である一方で、
+
+評価系とは別のメタレイヤーを導入する
+
+展開規則の理解が必要になる
+
+衛生性（hygiene）などの問題が生じる
+
+といった複雑性を伴う。
+
+一方で、関数適用そのものはすでに言語の中核に存在しており、これを用いて構文的役割を担わせることができれば、より単純な体系が得られる可能性がある。
+
+本稿ではこの観点から、「インライン関数を構文として扱う」という再解釈を提案する。
+
+---
+
+2. 基本アイデア
+
+出発点は次の形である：
+
+((lambda ...)
+
+これは通常、ラムダ式によって生成された関数オブジェクトを即座に適用する式として解釈される。
+
+しかし本稿では、この評価モデルを変更し、
+
+&gt; 「ラムダ式が生成する関数をオブジェクトとして扱うのではなく、呼び出し位置にインライン展開される構文として扱う」
+
+という再解釈を行う。
+
+このとき、ラムダ式は値ではなく、構文的テンプレートとして振る舞う。
+
+---
+
+3. 文法としてのインライン関数
+
+この再解釈の下では、いくつかの基本構文が自然に表現できる。
+
+3.1 let の再表現
+
+(let ((x v)) body)
+
+は、
+
+((lambda (x) body) v)
+
+と等価であることはよく知られている。
+
+ここでさらに一歩進めて、これを単なる関数適用ではなく「構文」とみなすことで、let は新たな構文ではなくインライン関数の特殊形と捉えられる。
+
+---
+
+3.2 制御構造の記述
+
+同様に、ループや条件分岐も再帰や遅延評価を用いて記述可能である。
+
+例えば while 的な構造は、自己再帰するラムダとして記述できる：
+
+((lambda (loop)
+   (loop loop))
+ (lambda (self)
+   (if cond
+       (begin body (self self))
+       #f)))
+
+このような構造は通常「高階関数によるエンコーディング」と見なされるが、本稿の立場ではこれを構文の一種として扱う。
+
+---
+
+4. マクロとの関係
+
+本手法はマクロの代替となる可能性を持つが、完全な置き換えではない。
+
+マクロが持つ特徴：
+
+任意の構文変換が可能
+コンパイル時に実行される
+
+に対し、本手法は：
+
+評価規則の再解釈に基づく
+単一の構成要素（ラムダ）に統一される
+
+という特徴を持つ。
+
+したがって本手法は、
+
+&gt; 「構文拡張を関数機構へ還元するアプローチ」
+
+と位置付けられる。
+
+---
+
+5. 技術的課題
+
+このアプローチには未解決の問題が存在する：
+
+評価順序の定義
+インライン展開と通常評価の整合性
+
+変数捕捉（variable capture）
+マクロと同様の衛生性問題
+
+最適化との関係
+インライン化とコンパイラ最適化の境界
+
+意味論の定式化
+これは単なる変換規則なのか、新しい評価戦略なのか
+
+これらは今後の検討課題である。
+
+---
+
+6. 結論
+
+本稿では、即時実行されるラムダ式を構文として扱う「Inline Functions as Syntax」という考え方を提案した。
+
+このアプローチは、
+
+関数と構文の境界を曖昧にする
+マクロに依存しない構文表現の可能性を示す
+言語の最小コアを再検討する契機となる
+
+という意義を持つ。
+
+今後は形式意味論の確立および実装による検証が必要である。
+
+🎯「継続（コンティニュエーション）は任意の制御構造を書くことができる」。👈こういうことシレッと言うわけですよ。継続ってマルチタスクOSがタイムシェアリングのために持つCPUコンテクストみたいなもんですよ？任意の制御構造を書けるなんてそりゃ当たり前です。制御構造どころか他のスレッドや他のプロセスにまでも自由に飛べるスペックなんですから。じゃあせいぜい任意の制御構造が書けさえすればいいだけなら何しか要らないか。その答えがファーストラムダなんです。
+
+⏩ それ、かなり強い言い方にできます。
+
+「継続で任意の制御構造が書ける」という説明は、たしかに強すぎる道具を持ち出して弱い結論を言っている感じがあります。
+
+継続は要するに、
+
+&gt; 「今この瞬間の“残りの計算”を値として捕まえて、あとでそこへ飛べる」
+
+というものだから、OSでいえばユーザ空間の関数呼び出しどころではなく、実行コンテクストそのものを持ち運ぶ発想に近い。だから loop も break も exception も coroutine も generator も backtracking も、理屈の上では書ける。そりゃそうだ、という話になる。
+
+でも問題はそこじゃない。
+
+あなたの言う「ファーストラムダ」は、たぶんこういう切り分けです。
+
+&gt; 任意の制御構造を書くために、継続ほど強いジャンプ能力は要らない。
+必要なのは、評価を遅らせたコード片を引数として渡し、それを呼び出し側にインライン展開できる保証である。
+
+つまり、
+
+(if condition
+    (lambda () then-body)
+    (lambda () else-body))
+
+みたいなものを本当に制御構造として使いたいなら、必要なのは「継続」ではなく、
+
+1. then/else を普通の値として即時評価しないこと
+
+2. それらを関数として渡せること
+
+3. その関数呼び出しが実行時クロージャ呼び出しではなく、構文的・意味的にインライン化されること
+
+この3つです。
+
+だから「ファーストラムダ」の主張は、
+
+&gt; マクロは要らない、とまでは言わない。
+しかし多くの制御構造は、マクロではなく「必ずインライン化されるラムダ」で表現できる。
+
+という方向になる。
+
+継続は「どこへでも飛べる」。
+ファーストラムダは「ここに書いたコード片を、ここに埋め込める」。
+
+この差は大きいです。
+
+継続は強すぎるので、意味論も実装も重くなる。プログラムの局所性も壊しやすい。呼び出しスタック、例外、リソース解放、デバッガ、最適化、スレッド境界、全部に影響する。
+
+一方でファーストラムダは、もっと地味で制限された道具です。でも、制御構造を書くという目的に対しては十分強い。
+
+この言い方がいいかもしれません。
+
+&gt; Continuations can express arbitrary control structures because they capture the whole future of computation.
+But that is overkill.
+To define ordinary control structures, we do not need first-class continuations; we need first-class inline lambdas.
+
+日本語なら：
+
+&gt; 継続は「残りの計算」全体を値にするので、任意の制御構造を書けるのは当然である。しかし通常の制御構造を書くために必要なのは、そこまで強い機構ではない。必要なのは、評価を遅延されたコード片を第一級の値として渡し、かつその呼び出しが実行時呼び出しではなくインライン展開として保証されることである。これがファーストラムダである。
+
+かなり論文の導入に使える骨格です。
+
+</pre></article></main></body></html>
